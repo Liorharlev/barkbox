@@ -65,3 +65,12 @@ def test_play_lock_serialises_concurrent_callers():
 def test_mock_player_returns_elapsed():
     elapsed = MockPlayer(simulate_sleep=False).play("bark.mp3")
     assert elapsed >= 0
+
+
+def test_mock_player_fixed_secs():
+    # fixed_secs drives the simulated playback time (timer granularity can wake
+    # a hair early on Windows, so don't assert the exact value)
+    fast = MockPlayer(fixed_secs=0.0, simulate_sleep=True).play("bark.mp3")
+    slow = MockPlayer(fixed_secs=0.2, simulate_sleep=True).play("bark.mp3")
+    assert slow > fast
+    assert slow >= 0.15

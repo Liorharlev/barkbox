@@ -17,8 +17,12 @@ Three independent control layers, each checked every scheduler cycle:
 
 When all three pass, the scheduler waits a random gap, then picks a **behavior**
 by weighted random choice — `alert`, `response`, `chase`, `noise_reaction`,
-`idle` — each with its own cadence, episode size and clip tags. Behavior weights
-are scaled by the current day-part (`morning` / `day` / `evening` / `night`).
+`idle` — each with its own clip tags and a target **episode duration**
+(`episode_duration_seconds`). The episode plays whole clips back to back, with
+random `intra_gap_seconds` pauses, until the elapsed time reaches the target
+(checked only between clips, never mid-clip); `max_barks` is just a safety cap.
+`idle` has no target and plays a single bark. Behavior weights are scaled by the
+current day-part (`morning` / `day` / `evening` / `night`).
 
 Clips live in `sounds/`. Tagging is optional and gradual: `sounds/tags.yaml`
 maps a filename to the behaviors it fits; untagged clips are a general fallback.

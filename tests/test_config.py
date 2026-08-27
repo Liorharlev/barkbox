@@ -87,6 +87,19 @@ def test_load_missing_file(tmp_path):
         load_config(tmp_path / "nope.yaml")
 
 
+def test_legacy_episode_barks_is_migrated_away(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "behaviors:\n"
+        "  alert:\n"
+        "    episode_barks: [2, 5]\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(p)  # must not raise
+    assert "episode_barks" not in cfg["behaviors"]["alert"]
+    assert cfg["behaviors"]["alert"]["episode_duration_seconds"] == [15, 45]
+
+
 def test_save_roundtrip_is_atomic(tmp_path):
     p = tmp_path / "config.yaml"
     data = copy.deepcopy(DEFAULTS)
@@ -107,7 +120,10 @@ def test_save_roundtrip_is_atomic(tmp_path):
         lambda c: c["timing"].update(frequency="turbo"),
         lambda c: c["timing"]["frequency_presets"]["low"].update(min_gap_minutes=999),
         lambda c: c["behaviors"]["alert"].update(weight=-2),
-        lambda c: c["behaviors"]["alert"].update(episode_barks=[5, 2]),
+        lambda c: c["behaviors"]["alert"].update(max_barks=0),
+        lambda c: c["behaviors"]["alert"].update(max_barks=1.5),
+        lambda c: c["behaviors"]["alert"].update(episode_duration_seconds=[30, 5]),
+        lambda c: c["behaviors"]["alert"].update(episode_duration_seconds=[-1, 5]),
         lambda c: _disable_all_behaviors(c),
         lambda c: c["audio"].update(volume=3),
     ],

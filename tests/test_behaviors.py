@@ -51,7 +51,14 @@ def test_pick_behavior_raises_without_enabled():
 
 def test_episode_params_returns_copies():
     p = episode_params(BEHAVIORS, "chase")
-    assert p["episode_barks"] == [3, 6]
+    assert p["max_barks"] == 40
+    assert p["episode_duration_seconds"] == [8, 20]
     assert p["clip_tags"] == ["chase"]
-    p["episode_barks"].append(99)
-    assert BEHAVIORS["chase"]["episode_barks"] == [3, 6]
+    p["episode_duration_seconds"].append(99)
+    assert BEHAVIORS["chase"]["episode_duration_seconds"] == [8, 20]
+
+
+def test_episode_params_idle_has_no_duration():
+    p = episode_params(BEHAVIORS, "idle")
+    assert p["episode_duration_seconds"] is None
+    assert p["max_barks"] == 1

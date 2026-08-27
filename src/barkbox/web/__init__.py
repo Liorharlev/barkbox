@@ -77,7 +77,12 @@ def create_app(config_path, state, events, player, rng: random.Random | None = N
             presence_mode=state.presence_mode,
             frequency=cfg["timing"]["frequency"],
             behaviors={
-                k: {"enabled": b["enabled"], "weight": b["weight"]}
+                k: {
+                    "enabled": b["enabled"],
+                    "weight": b["weight"],
+                    "duration_min": (b.get("episode_duration_seconds") or [None])[0],
+                    "duration_max": (b.get("episode_duration_seconds") or [None, None])[1],
+                }
                 for k, b in cfg["behaviors"].items()
             },
             next_event_at=_iso(state.next_event_at),
@@ -159,6 +164,20 @@ def create_app(config_path, state, events, player, rng: random.Random | None = N
             if w < 0:
                 return jsonify(error="weight must be >= 0"), 400
             cfg["behaviors"][key]["weight"] = w
+        if "duration_max" in body:
+            b = cfg["behaviors"][key]
+            eds = b.get("episode_duration_seconds")
+            if not eds:
+                return jsonify(error=f"behavior {key!r} has no episode duration to adjust"), 400
+            try:
+                dmax = float(body["duration_max"])
+            except (TypeError, ValueError):
+                return jsonify(error="duration_max must be a number"), 400
+            if dmax < eds[0]:
+                return jsonify(
+                    error=f"duration_max must be >= {eds[0]} (the configured minimum)"
+                ), 400
+            b["episode_duration_seconds"] = [eds[0], dmax]
         _save(cfg, "config_changed", f"behavior:{key}")
         return jsonify(behavior=key, **cfg["behaviors"][key])
 

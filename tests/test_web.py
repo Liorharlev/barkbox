@@ -14,7 +14,8 @@ def client(tmp_path):
     cfg_path = tmp_path / "config.yaml"
     data = copy.deepcopy(DEFAULTS)
     for b in data["behaviors"].values():
-        b["episode_barks"] = [1, 1]
+        if "episode_duration_seconds" in b:
+            b["episode_duration_seconds"] = [0, 0]   # keep the field, but instant
         b["intra_gap_seconds"] = [0, 0]
     save_config(cfg_path, data)
     (tmp_path / "sounds").mkdir()
@@ -64,6 +65,24 @@ def test_schedule_rejects_bad_time(client):
     assert r.status_code == 400
 
 
+def test_schedule_updates_window_and_wakes(client):
+    r = client.post("/api/schedule", json={"mode": "active_window",
+                                           "active_window": {"start": "08:30", "end": "21:45"}})
+    assert r.status_code == 200
+    sched = load_config(client._cfg_path)["schedule"]
+    assert sched["mode"] == "active_window"
+    assert sched["active_window"] == {"start": "08:30", "end": "21:45"}
+    assert client._state.wake_event.is_set()
+
+
+def test_schedule_quiet_window_independent_of_active(client):
+    client.post("/api/schedule", json={"mode": "quiet_window",
+                                       "quiet_window": {"start": "01:00", "end": "05:30"}})
+    sched = load_config(client._cfg_path)["schedule"]
+    assert sched["quiet_window"] == {"start": "01:00", "end": "05:30"}
+    assert sched["active_window"] == DEFAULTS["schedule"]["active_window"]  # untouched
+
+
 def test_behavior_disable(client):
     r = client.post("/api/behaviors", json={"key": "chase", "enabled": False})
     assert r.get_json()["enabled"] is False
@@ -72,6 +91,33 @@ def test_behavior_disable(client):
 
 def test_behavior_unknown_key(client):
     assert client.post("/api/behaviors", json={"key": "zoomies"}).status_code == 400
+
+
+def test_status_exposes_behavior_duration(client):
+    b = client.get("/api/status").get_json()["behaviors"]
+    assert "duration_max" in b["alert"]
+    assert b["idle"]["duration_max"] is None       # idle has no duration target
+
+
+def test_behavior_duration_max_update_persists(client):
+    r = client.post("/api/behaviors", json={"key": "alert", "duration_max": 30})
+    assert r.status_code == 200
+    eds = load_config(client._cfg_path)["behaviors"]["alert"]["episode_duration_seconds"]
+    assert eds[1] == 30
+
+
+def test_behavior_duration_max_rejected_for_single_bark_behavior(client):
+    r = client.post("/api/behaviors", json={"key": "idle", "duration_max": 10})
+    assert r.status_code == 400
+
+
+def test_behavior_duration_max_rejected_below_minimum(client):
+    # raise the minimum first so there's something to violate
+    cfg = load_config(client._cfg_path)
+    cfg["behaviors"]["alert"]["episode_duration_seconds"] = [12, 20]
+    save_config(client._cfg_path, cfg)
+    r = client.post("/api/behaviors", json={"key": "alert", "duration_max": 5})
+    assert r.status_code == 400
 
 
 def test_disabling_last_behavior_is_refused(client):

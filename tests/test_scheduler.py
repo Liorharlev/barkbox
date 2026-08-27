@@ -82,23 +82,53 @@ def test_gap_seconds_zero_multiplier_means_quiet():
 
 # -- _run_episode ------------------------------------------------------
 
-def test_run_episode_plays_and_records():
+def test_run_episode_single_bark_when_no_duration():
     state, events = AppState(), EventLog()
-    params = {"episode_barks": [3, 3], "intra_gap_seconds": [0, 0], "clip_tags": ["alert"]}
+    params = {"max_barks": 40, "episode_duration_seconds": None,
+              "intra_gap_seconds": [0, 0], "clip_tags": ["idle"]}
     _run_episode(
-        "alert", params, CLIPS, {}, no_repeat_last=2,
+        "idle", params, CLIPS, {}, no_repeat_last=2,
         player=MockPlayer(simulate_sleep=False), state=state, events=events,
         rng=random.Random(3), stop_event=threading.Event(),
     )
-    assert len(state.recent_clips) == 3
-    kinds = [e["kind"] for e in events.recent()]
-    assert "played:alert" in kinds
+    assert len(state.recent_clips) == 1
+    assert "played:idle" in [e["kind"] for e in events.recent()]
+
+
+def test_run_episode_stops_after_full_bark_near_target():
+    state, events = AppState(), EventLog()
+    player = MockPlayer(fixed_secs=0.1, simulate_sleep=True)   # each bark ~0.1s
+    params = {"max_barks": 40, "episode_duration_seconds": [1.0, 1.0],
+              "intra_gap_seconds": [0, 0], "clip_tags": []}
+    _run_episode(
+        "alert", params, CLIPS, {}, 2, player, state, events,
+        random.Random(1), threading.Event(),
+    )
+    n = len(state.recent_clips)
+    # ~10 barks of 0.1s to reach the 1.0s target; wide band for CI timing jitter
+    assert 5 <= n < 40
+    detail = events.recent()[0]["detail"]
+    assert "cap" not in detail            # stopped on the target, not the safety cap
+
+
+def test_run_episode_max_barks_is_a_hard_cap():
+    state, events = AppState(), EventLog()
+    params = {"max_barks": 6, "episode_duration_seconds": [999, 999],  # target never reached
+              "intra_gap_seconds": [0, 0], "clip_tags": []}
+    _run_episode(
+        "alert", params, CLIPS, {}, 2, MockPlayer(simulate_sleep=False),
+        state, events, random.Random(1), threading.Event(),
+    )
+    assert len(state.recent_clips) == 6
+    assert "cap" in events.recent()[0]["detail"]
 
 
 def test_run_episode_no_clips_is_noted():
     events = EventLog()
     _run_episode(
-        "chase", {"episode_barks": [1, 2], "intra_gap_seconds": [0, 0], "clip_tags": ["chase"]},
+        "chase",
+        {"max_barks": 40, "episode_duration_seconds": [1, 2],
+         "intra_gap_seconds": [0, 0], "clip_tags": ["chase"]},
         [], {}, 3, MockPlayer(simulate_sleep=False), AppState(), events,
         random.Random(), threading.Event(),
     )
@@ -115,7 +145,7 @@ def _fast_config(tmp_path):
     cfg["paths"]["sounds_dir"] = str(tmp_path)
     cfg["paths"]["tags_file"] = str(tmp_path / "tags.yaml")
     for b in cfg["behaviors"].values():
-        b["episode_barks"] = [1, 1]
+        b.pop("episode_duration_seconds", None)   # single bark per episode -> fast
         b["intra_gap_seconds"] = [0, 0]
     return cfg
 

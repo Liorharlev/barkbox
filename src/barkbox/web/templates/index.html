@@ -45,12 +45,19 @@
       <button data-mode="active_window">Active window</button>
       <button data-mode="quiet_window">Quiet window</button>
     </div>
-    <p id="schedule-detail" class="muted"></p>
+    <div id="schedule-times" hidden>
+      <label>from <input type="time" id="sched-start"></label>
+      <label>to <input type="time" id="sched-end"></label>
+      <span id="schedule-detail" class="muted"></span>
+    </div>
   </section>
 
   <section class="card">
     <h2>Behaviors</h2>
-    <table id="behaviors"><tbody></tbody></table>
+    <table id="behaviors">
+      <thead><tr><th>behavior</th><th>weight</th><th>episode</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
   </section>
 
   <section class="card">
@@ -84,6 +91,8 @@ const post = (url, body) => j(url, {
   body: body ? JSON.stringify(body) : null,
 });
 
+let scheduleMode = "always";
+
 function setActive(groupId, attr, value) {
   document.querySelectorAll(`#${groupId} button`).forEach(b => {
     b.classList.toggle("active", b.dataset[attr] === String(value));
@@ -102,23 +111,38 @@ async function refresh() {
   setActive("frequency", "value", s.frequency);
   setActive("schedule", "mode", s.schedule.mode);
 
-  const w = s.schedule[s.schedule.mode === "quiet_window" ? "quiet_window" : "active_window"];
-  document.getElementById("schedule-detail").textContent =
-    s.schedule.mode === "always" ? "" : `${w.start} – ${w.end}`;
+  scheduleMode = s.schedule.mode;
+  const times = document.getElementById("schedule-times");
+  const start = document.getElementById("sched-start");
+  const end = document.getElementById("sched-end");
+  if (scheduleMode === "always") {
+    times.hidden = true;
+  } else {
+    times.hidden = false;
+    const w = s.schedule[scheduleMode];
+    if (document.activeElement !== start) start.value = w.start;
+    if (document.activeElement !== end) end.value = w.end;
+    document.getElementById("schedule-detail").textContent =
+      scheduleMode === "quiet_window" ? "(silent in this window)" : "(active only in this window)";
+  }
 
   const tb = document.querySelector("#behaviors tbody");
   tb.innerHTML = "";
   for (const [key, b] of Object.entries(s.behaviors)) {
     const tr = document.createElement("tr");
+    const durCell = b.duration_max != null
+      ? `<label>≤<input type="number" min="${b.duration_min ?? 0}" step="1" value="${b.duration_max}" data-key="${key}" data-field="duration_max">s</label>`
+      : `<span class="muted">single</span>`;
     tr.innerHTML = `<td>${key}</td>
-      <td><input type="number" min="0" step="0.1" value="${b.weight}" data-key="${key}"></td>
+      <td><label>w <input type="number" min="0" step="0.1" value="${b.weight}" data-key="${key}" data-field="weight"></label></td>
+      <td>${durCell}</td>
       <td><button data-key="${key}" data-enabled="${b.enabled}">${b.enabled ? "on" : "off"}</button></td>`;
     tb.appendChild(tr);
   }
   tb.querySelectorAll("button").forEach(btn => btn.onclick = () =>
     post("/api/behaviors", {key: btn.dataset.key, enabled: btn.dataset.enabled !== "true"}).then(refresh));
   tb.querySelectorAll("input").forEach(inp => inp.onchange = () =>
-    post("/api/behaviors", {key: inp.dataset.key, weight: parseFloat(inp.value)}).then(refresh));
+    post("/api/behaviors", {key: inp.dataset.key, [inp.dataset.field]: parseFloat(inp.value)}).then(refresh));
 
   const g = document.getElementById("status-grid");
   g.innerHTML = "";
@@ -154,6 +178,16 @@ document.querySelectorAll("#frequency button").forEach(b =>
   b.onclick = () => post("/api/frequency", {value: b.dataset.value}).then(refresh));
 document.querySelectorAll("#schedule button").forEach(b =>
   b.onclick = () => post("/api/schedule", {mode: b.dataset.mode}).then(refresh));
+
+function saveScheduleTimes() {
+  if (scheduleMode === "always") return;
+  const start = document.getElementById("sched-start").value;
+  const end = document.getElementById("sched-end").value;
+  if (!start || !end) return;
+  post("/api/schedule", {mode: scheduleMode, [scheduleMode]: {start, end}}).then(refresh);
+}
+document.getElementById("sched-start").onchange = saveScheduleTimes;
+document.getElementById("sched-end").onchange = saveScheduleTimes;
 document.querySelectorAll("#test-bark button").forEach(b =>
   b.onclick = () => post("/api/test-bark", {behavior: b.dataset.behavior}).then(() =>
     setTimeout(refreshEvents, 800)));

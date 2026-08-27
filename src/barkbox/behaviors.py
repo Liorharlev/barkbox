@@ -42,10 +42,18 @@ def pick_behavior(behaviors_cfg: dict, day_part: str, rng: random.Random) -> str
 
 
 def episode_params(behaviors_cfg: dict, behavior_key: str) -> dict:
-    """Episode shape for the chosen behavior."""
+    """Episode shape for the chosen behavior.
+
+    ``episode_duration_seconds`` is the target the episode plays toward (a random
+    value in that range is drawn per episode); ``max_barks`` is only an upper
+    safety bound. A behavior without ``episode_duration_seconds`` (e.g. idle)
+    plays a single bark.
+    """
     b = behaviors_cfg[behavior_key]
+    dur = b.get("episode_duration_seconds")
     return {
-        "episode_barks": list(b["episode_barks"]),
+        "max_barks": int(b["max_barks"]),
+        "episode_duration_seconds": list(dur) if dur else None,
         "intra_gap_seconds": list(b["intra_gap_seconds"]),
         "clip_tags": list(b["clip_tags"]),
     }

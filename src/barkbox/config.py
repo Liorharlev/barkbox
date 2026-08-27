@@ -71,7 +71,8 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "weight": 1.0,
             "time_weights": {"morning": 1.0, "day": 0.8, "evening": 1.2, "night": 1.5},
-            "episode_barks": [2, 5],
+            "episode_duration_seconds": [15, 45],
+            "max_barks": 40,
             "intra_gap_seconds": [2, 12],
             "clip_tags": ["alert"],
         },
@@ -79,7 +80,8 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "weight": 2.0,
             "time_weights": {"morning": 1.2, "day": 1.0, "evening": 1.1, "night": 0.6},
-            "episode_barks": [1, 2],
+            "episode_duration_seconds": [3, 10],
+            "max_barks": 40,
             "intra_gap_seconds": [1, 4],
             "clip_tags": ["response"],
         },
@@ -87,7 +89,8 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "weight": 0.7,
             "time_weights": {"morning": 1.5, "day": 0.8, "evening": 1.3, "night": 0.1},
-            "episode_barks": [3, 6],
+            "episode_duration_seconds": [8, 20],
+            "max_barks": 40,
             "intra_gap_seconds": [0.5, 2],
             "clip_tags": ["chase"],
         },
@@ -95,7 +98,8 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "weight": 1.0,
             "time_weights": {"morning": 1.0, "day": 1.0, "evening": 1.0, "night": 0.7},
-            "episode_barks": [1, 3],
+            "episode_duration_seconds": [5, 15],
+            "max_barks": 40,
             "intra_gap_seconds": [1, 3],
             "clip_tags": ["noise"],
         },
@@ -103,7 +107,7 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "weight": 0.3,
             "time_weights": {"morning": 1.0, "day": 1.0, "evening": 1.0, "night": 0.5},
-            "episode_barks": [1, 1],
+            "max_barks": 1,
             "intra_gap_seconds": [0, 0],
             "clip_tags": ["idle"],
         },
@@ -115,10 +119,24 @@ DEFAULTS: dict[str, Any] = {
     "alarm": {
         "enabled": False,
         "duration_minutes": 10,
-        "episode_barks": [8, 15],
+        "episode_duration_seconds": [10, 25],
+        "max_barks": 40,
         "episode_gap_seconds": [1, 4],
     },
 }
+
+
+def _migrate(cfg: dict) -> None:
+    """In-place upgrade of superseded fields so old ``config.yaml`` files load.
+
+    ``episode_barks: [lo, hi]`` was replaced by ``episode_duration_seconds`` +
+    ``max_barks``; drop the stale key (defaults supply the new ones).
+    """
+    for b in cfg.get("behaviors", {}).values():
+        if isinstance(b, dict):
+            b.pop("episode_barks", None)
+    if isinstance(cfg.get("alarm"), dict):
+        cfg["alarm"].pop("episode_barks", None)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -233,7 +251,13 @@ def _validate(cfg: dict) -> None:
         w = b.get("weight")
         if not isinstance(w, (int, float)) or w < 0:
             raise ConfigError(f"behaviors.{name}.weight must be a number >= 0")
-        _validate_int_pair(b.get("episode_barks"), f"behaviors.{name}.episode_barks", minimum=1)
+        _validate_max_barks(b.get("max_barks"), f"behaviors.{name}.max_barks")
+        if b.get("episode_duration_seconds") is not None:
+            _validate_num_pair(
+                b.get("episode_duration_seconds"),
+                f"behaviors.{name}.episode_duration_seconds",
+                minimum=0,
+            )
         _validate_num_pair(
             b.get("intra_gap_seconds"), f"behaviors.{name}.intra_gap_seconds", minimum=0
         )
@@ -266,7 +290,10 @@ def _validate(cfg: dict) -> None:
         raise ConfigError("web.port must be an int in [1, 65535]")
 
     alarm = cfg["alarm"]
-    _validate_int_pair(alarm.get("episode_barks"), "alarm.episode_barks", minimum=1)
+    _validate_max_barks(alarm.get("max_barks"), "alarm.max_barks")
+    _validate_num_pair(
+        alarm.get("episode_duration_seconds"), "alarm.episode_duration_seconds", minimum=0
+    )
     _validate_num_pair(alarm.get("episode_gap_seconds"), "alarm.episode_gap_seconds", minimum=0)
     if not isinstance(alarm.get("duration_minutes"), (int, float)) or alarm["duration_minutes"] <= 0:
         raise ConfigError("alarm.duration_minutes must be a number > 0")
@@ -284,16 +311,9 @@ def _validate_num_pair(value: Any, label: str, *, minimum: float) -> None:
         raise ConfigError(f"{label}: need {minimum} <= low <= high")
 
 
-def _validate_int_pair(value: Any, label: str, *, minimum: int) -> None:
-    if (
-        not isinstance(value, (list, tuple))
-        or len(value) != 2
-        or not all(isinstance(x, int) and not isinstance(x, bool) for x in value)
-    ):
-        raise ConfigError(f"{label} must be [low, high] integers")
-    lo, hi = value
-    if lo < minimum or hi < lo:
-        raise ConfigError(f"{label}: need {minimum} <= low <= high")
+def _validate_max_barks(value: Any, label: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 500:
+        raise ConfigError(f"{label} must be an int in [1, 500]")
 
 
 def load_config(path: str | os.PathLike) -> dict:
@@ -311,6 +331,7 @@ def load_config(path: str | os.PathLike) -> dict:
     if not isinstance(raw, dict):
         raise ConfigError(f"{p}: top level must be a mapping")
     cfg = _deep_merge(DEFAULTS, raw)
+    _migrate(cfg)
     _validate(cfg)
     return cfg
 
@@ -321,6 +342,7 @@ def save_config(path: str | os.PathLike, data: dict) -> None:
     Serialised with a module-level lock so a scheduler read never sees a
     half-written file.
     """
+    _migrate(data)
     _validate(_deep_merge(DEFAULTS, data))
     p = Path(path)
     text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)

@@ -87,23 +87,45 @@ def _run_episode(
     rng: random.Random,
     stop_event: threading.Event,
 ) -> None:
+    """Play an episode toward a random target duration.
+
+    Each cycle: play one whole clip, then (never mid-clip) check whether the
+    elapsed time — playback plus the random intra-episode gaps so far — has
+    reached the target. If so, stop. ``max_barks`` caps the count so a library of
+    very short clips can't spin forever. A behavior with no target duration plays
+    exactly one bark.
+    """
     clips = resolve_clips(all_clips, tags, params["clip_tags"])
     if not clips:
         events.add("skipped_no_clips", behavior)
         return
-    lo, hi = params["episode_barks"]
-    n = rng.randint(int(lo), int(hi))
+
+    max_barks = int(params.get("max_barks", 40))
+    dur = params.get("episode_duration_seconds")
+    target = rng.uniform(dur[0], dur[1]) if dur else 0.0
     g_lo, g_hi = params["intra_gap_seconds"]
-    for i in range(n):
+
+    started = time.monotonic()
+    n = 0
+    elapsed = 0.0
+    while n < max_barks:
         if stop_event.is_set():
-            return
+            break
         clip = pick_clip(clips, state.recent_clips, no_repeat_last, rng)
         player.play(clip)
         state.note_played(clip.name)
-        if i < n - 1 and g_hi > 0:
-            if stop_event.wait(rng.uniform(g_lo, g_hi)):
-                return
-    events.add(f"played:{behavior}", f"{n} bark(s)")
+        n += 1
+        elapsed = time.monotonic() - started
+        if elapsed >= target:
+            break
+        if g_hi > 0 and stop_event.wait(rng.uniform(g_lo, g_hi)):
+            break
+
+    hit_cap = n >= max_barks and elapsed < target
+    events.add(
+        f"played:{behavior}",
+        f"{n} bark(s), {elapsed:.0f}s" + (" (max_barks cap)" if hit_cap else ""),
+    )
 
 
 def run(stop_event, get_config, state, events, player, rng: random.Random | None = None) -> None:
@@ -138,7 +160,8 @@ def run(stop_event, get_config, state, events, player, rng: random.Random | None
             _run_episode(
                 "alarm",
                 {
-                    "episode_barks": alarm["episode_barks"],
+                    "max_barks": alarm["max_barks"],
+                    "episode_duration_seconds": alarm["episode_duration_seconds"],
                     "intra_gap_seconds": alarm["episode_gap_seconds"],
                     "clip_tags": [],
                 },

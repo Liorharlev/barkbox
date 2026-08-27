@@ -89,13 +89,19 @@ class MockPlayer(_BasePlayer):
 
     backend = "mock"
 
-    def __init__(self, rng: random.Random | None = None, simulate_sleep: bool = True) -> None:
+    def __init__(
+        self,
+        rng: random.Random | None = None,
+        simulate_sleep: bool = True,
+        fixed_secs: float | None = None,
+    ) -> None:
         super().__init__()
         self._rng = rng or random.Random()
         self._simulate_sleep = simulate_sleep
+        self._fixed_secs = fixed_secs
 
     def _play_impl(self, path: Path) -> None:
-        secs = round(self._rng.uniform(0.3, 1.4), 2)
+        secs = self._fixed_secs if self._fixed_secs is not None else round(self._rng.uniform(0.3, 1.4), 2)
         logger.info("[MOCK] play %s (~%.1fs)", path.name, secs)
         if self._simulate_sleep:
             time.sleep(secs)
