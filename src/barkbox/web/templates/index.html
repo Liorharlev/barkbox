@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>barkbox — presence simulation</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+<main>
+  <h1>🐕 barkbox</h1>
+  <p class="sub">dog presence simulation</p>
+
+  <section class="card">
+    <div class="row">
+      <div>
+        <h2>Master switch</h2>
+        <p id="enabled-state" class="muted">…</p>
+      </div>
+      <button id="toggle" class="big">Toggle</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Presence</h2>
+    <div class="btn-group" id="presence">
+      <button data-mode="home">Home (quiet)</button>
+      <button data-mode="away">Away (full)</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Frequency</h2>
+    <div class="btn-group" id="frequency">
+      <button data-value="low">Low</button>
+      <button data-value="medium">Medium</button>
+      <button data-value="high">High</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Schedule</h2>
+    <div class="btn-group" id="schedule">
+      <button data-mode="always">Always</button>
+      <button data-mode="active_window">Active window</button>
+      <button data-mode="quiet_window">Quiet window</button>
+    </div>
+    <p id="schedule-detail" class="muted"></p>
+  </section>
+
+  <section class="card">
+    <h2>Behaviors</h2>
+    <table id="behaviors"><tbody></tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>Manual</h2>
+    <div class="btn-group" id="test-bark">
+      <button data-behavior="alert">Test: alert</button>
+      <button data-behavior="response">Test: response</button>
+      <button data-behavior="chase">Test: chase</button>
+      <button data-behavior="noise_reaction">Test: noise</button>
+      <button data-behavior="idle">Test: idle</button>
+    </div>
+    <button id="alarm" class="danger">Trigger alarm mode</button>
+  </section>
+
+  <section class="card">
+    <h2>Status</h2>
+    <dl id="status-grid"></dl>
+  </section>
+
+  <section class="card">
+    <h2>Recent events</h2>
+    <ul id="events" class="events"></ul>
+  </section>
+</main>
+
+<script>
+const j = (url, opts) => fetch(url, opts).then(r => r.json());
+const post = (url, body) => j(url, {
+  method: "POST",
+  headers: {"Content-Type": "application/json"},
+  body: body ? JSON.stringify(body) : null,
+});
+
+function setActive(groupId, attr, value) {
+  document.querySelectorAll(`#${groupId} button`).forEach(b => {
+    b.classList.toggle("active", b.dataset[attr] === String(value));
+  });
+}
+
+async function refresh() {
+  let s;
+  try { s = await j("/api/status"); } catch { return; }
+
+  document.getElementById("enabled-state").textContent =
+    s.enabled ? "ON — simulating" : "OFF — silent";
+  document.getElementById("enabled-state").className = s.enabled ? "on" : "off";
+
+  setActive("presence", "mode", s.presence_mode);
+  setActive("frequency", "value", s.frequency);
+  setActive("schedule", "mode", s.schedule.mode);
+
+  const w = s.schedule[s.schedule.mode === "quiet_window" ? "quiet_window" : "active_window"];
+  document.getElementById("schedule-detail").textContent =
+    s.schedule.mode === "always" ? "" : `${w.start} – ${w.end}`;
+
+  const tb = document.querySelector("#behaviors tbody");
+  tb.innerHTML = "";
+  for (const [key, b] of Object.entries(s.behaviors)) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${key}</td>
+      <td><input type="number" min="0" step="0.1" value="${b.weight}" data-key="${key}"></td>
+      <td><button data-key="${key}" data-enabled="${b.enabled}">${b.enabled ? "on" : "off"}</button></td>`;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll("button").forEach(btn => btn.onclick = () =>
+    post("/api/behaviors", {key: btn.dataset.key, enabled: btn.dataset.enabled !== "true"}).then(refresh));
+  tb.querySelectorAll("input").forEach(inp => inp.onchange = () =>
+    post("/api/behaviors", {key: inp.dataset.key, weight: parseFloat(inp.value)}).then(refresh));
+
+  const g = document.getElementById("status-grid");
+  g.innerHTML = "";
+  const rows = {
+    "Next event": s.next_event_at || "—",
+    "Last clip": s.last_event ? `${s.last_event.clip} @ ${s.last_event.time}` : "—",
+    "Alarm": s.alarm_active ? `active until ${s.alarm_until}` : "off",
+    "Clips": `${s.clip_count} (${s.tagged_clip_count} tagged)`,
+    "Audio backend": s.backend,
+  };
+  for (const [k, v] of Object.entries(rows)) {
+    g.innerHTML += `<dt>${k}</dt><dd>${v}</dd>`;
+  }
+}
+
+async function refreshEvents() {
+  let data;
+  try { data = await j("/api/events"); } catch { return; }
+  const ul = document.getElementById("events");
+  ul.innerHTML = "";
+  for (const e of data.events) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="t">${e.time.replace("T", " ")}</span> <span class="k">${e.kind}</span> ${e.detail || ""}`;
+    ul.appendChild(li);
+  }
+}
+
+document.getElementById("toggle").onclick = () => post("/api/toggle").then(refresh);
+document.getElementById("alarm").onclick = () => post("/api/alarm-test").then(() => { refresh(); refreshEvents(); });
+document.querySelectorAll("#presence button").forEach(b =>
+  b.onclick = () => post("/api/presence", {mode: b.dataset.mode}).then(refresh));
+document.querySelectorAll("#frequency button").forEach(b =>
+  b.onclick = () => post("/api/frequency", {value: b.dataset.value}).then(refresh));
+document.querySelectorAll("#schedule button").forEach(b =>
+  b.onclick = () => post("/api/schedule", {mode: b.dataset.mode}).then(refresh));
+document.querySelectorAll("#test-bark button").forEach(b =>
+  b.onclick = () => post("/api/test-bark", {behavior: b.dataset.behavior}).then(() =>
+    setTimeout(refreshEvents, 800)));
+
+refresh();
+refreshEvents();
+setInterval(refresh, 5000);
+setInterval(refreshEvents, 5000);
+</script>
+</body>
+</html>

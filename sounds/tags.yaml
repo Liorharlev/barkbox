@@ -1,0 +1,12 @@
+# Clip tagging — fills in gradually.
+#
+#   <filename>: [<behavior tag>, ...]
+#
+# Behavior tags used by the default config: alert, response, chase, noise, idle
+# A clip NOT listed here is "untagged" and is used as a general fallback for any
+# behavior that has no tagged clips of its own.
+#
+# Examples (uncomment and adjust once you have real files):
+# bark_01.mp3: [alert, response]
+# bark_02.mp3: [chase]
+# bark_03.mp3: [response, noise]

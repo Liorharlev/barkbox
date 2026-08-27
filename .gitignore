@@ -1,0 +1,25 @@
+# runtime config (copied from config.example.yaml, mutated by the web UI)
+config.yaml
+
+# virtualenv
+venv/
+.venv/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# sound files (add your own; keep the folder + docs tracked)
+sounds/*.mp3
+sounds/*.wav
+
+# logs / scratch
+*.log
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

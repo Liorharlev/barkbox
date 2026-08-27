@@ -1,0 +1,16 @@
+[Unit]
+Description=barkbox — dog presence simulation
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/dog-bark-deterrent
+Environment=BARKBOX_CONFIG=/home/pi/dog-bark-deterrent/config.yaml
+ExecStart=/home/pi/dog-bark-deterrent/venv/bin/python run.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
