@@ -35,6 +35,22 @@ def test_mpg123_volume_scaling():
     assert cmd[cmd.index("-f") + 1] == str(16384)
 
 
+def test_mpg123_combines_base_and_per_call_volume():
+    cmd = Player("mpg123", volume=0.5)._command(__import__("pathlib").Path("a.mp3"), 0.5)
+    assert cmd[cmd.index("-f") + 1] == str(8192)   # 0.5 * 0.5 * 32768
+
+
+def test_ffplay_uses_volume_filter():
+    cmd = Player("ffplay", volume=1.0)._command(__import__("pathlib").Path("a.mp3"), 0.4)
+    assert cmd[cmd.index("-af") + 1] == "volume=0.4000"
+    assert "-volume" not in cmd
+
+
+def test_ffplay_default_volume_is_base_gain():
+    cmd = Player("ffplay", volume=0.9)._command(__import__("pathlib").Path("a.mp3"))
+    assert cmd[cmd.index("-af") + 1] == "volume=0.9000"
+
+
 def test_device_included_only_when_set():
     assert "-a" not in Player("mpg123", device="default")._command(__import__("pathlib").Path("a.mp3"))
     assert "-a" in Player("mpg123", device="hw:1,0")._command(__import__("pathlib").Path("a.mp3"))
@@ -47,7 +63,7 @@ def test_play_lock_serialises_concurrent_callers():
             self.active = 0
             self.max_active = 0
 
-        def _play_impl(self, path):
+        def _play_impl(self, path, volume=1.0):
             self.active += 1
             self.max_active = max(self.max_active, self.active)
             time.sleep(0.03)

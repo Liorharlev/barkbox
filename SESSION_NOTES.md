@@ -1,6 +1,6 @@
 # barkbox — session notes
 
-_Working notes for picking the project back up quickly. Last updated: 2026-08-27._
+_Working notes for picking the project back up quickly. Last updated: 2026-08-29._
 
 ## What this is
 
@@ -10,8 +10,38 @@ outside believes a dog lives here, even when the house is empty. Not an alarm
 siren — alarm mode is a sub-case.
 
 Status: **step 1 built and verified on Windows** (dev). Hardware not bought/installed yet.
-Runs locally with `python run.py` → control UI on http://localhost:8080.
+Runs locally with `python run.py` → control UI on http://localhost:8080
+(or double-click `start_server.bat`, which cd's in, launches the server and opens
+the browser ~4 s later).
 Audio backend auto-detects (`ffplay` on this machine via ffmpeg; `mpg123` planned on the Pi; `mock` = log only).
+
+---
+
+## 2026-08-29 session — what changed (all in one commit)
+
+Feature work on top of `24eef6c`. Details in the sections below; quick index:
+
+1. **Distance simulation** (`src/barkbox/volume.py`, new) — per-bark volume random
+   walk for scheduled episodes whose target duration > 6 s, so the dog sounds like
+   it's moving around. Config-only (`distance_simulation` block).
+2. **Master volume** (`audio.master_volume`, 0–100, UI slider) — global level in
+   place of a knob on the speaker. Applies to scheduled episodes **and manual test
+   barks** (so a test previews the real level). Alarm still plays full volume — a
+   deliberate hold, revisit later. ffplay switched from `-volume` to `-af volume=`.
+3. **Frequency presets + Home multiplier are UI-editable** — "✎ Edit ranges" table
+   per preset, "slow down by ×N" field, live effective-range readout.
+4. **Behavior weights as a qualitative slider** — `Rare / Occasional / Frequent /
+   Constant` (→ 1/2/4/8), no raw numbers; plus a read-only "out of every 10 events" line.
+5. **Live "barking now" light** (green) per behavior row + **red "alarm active"
+   dot** next to Trigger alarm — both off `GET /api/now-playing`, polled 250 ms.
+6. **Master switch now stops an active alarm** immediately, and a **"Stop alarm"**
+   button (`POST /api/alarm-stop`) ends one early.
+7. **Manual test barks interrupt each other** — a fresh press cancels the running
+   one right away (`_run_episode` got a `cancelled` hook).
+8. **Schedule "Always" mode** fully hides the from/to row (was showing it, due to a
+   CSS specificity bug where `#schedule-times`'s `display:flex` beat `[hidden]`).
+
+139 tests pass (`venv\Scripts\pytest -q`), up from 83.
 
 ---
 
@@ -38,6 +68,29 @@ Audio backend auto-detects (`ffplay` on this machine via ffmpeg; `mpg123` planne
   is drawn each cycle, then divided by the presence multiplier.
 - `timing.day_parts` (morning/day/evening/night) — used only to scale behavior weights.
 
+### Frequency presets + Home multiplier are UI-editable  ← 2026-08-29
+
+The three presets keep their names / one-click role; only the minute ranges
+behind them became editable, plus the Home slow-down factor:
+
+- **Frequency card**: an "✎ Edit ranges" toggle reveals a per-preset
+  `From (min)` / `To (min)` table (rows ordered low→medium→high, matching the
+  buttons — `presetOrder()` reads the button order, since Flask `jsonify`
+  alphabetises the JSON keys). Each row → `POST /api/frequency-preset`
+  `{key, min, max}` (validates min>0, max>0, min≤max; `save_config` is the
+  backstop). Values persist as floats.
+- **Presence card**: a "slow the frequency down by ×N" number field.
+  `POST /api/home-multiplier {value: N}` stores `round(1/N, 6)` into the
+  existing `presence.multipliers.home` (away stays 1.0, not exposed).
+- **Live effective-range display** in the Frequency card (`renderEffectiveRange()`,
+  pure client-side, recomputed on every `input`/`change`): collapsed → one line
+  for the selected preset; while editing → one line per preset
+  (`Low — Away: every X–Y min · Home: every X·N–Y·N min`), so each row edit
+  gives immediate feedback.
+- `/api/status` now also returns `frequency_presets` (full dict) and
+  `home_multiplier`.
+- No config structure change; `config.example.yaml` comments updated.
+
 ### Behavior model
 
 Each cycle the scheduler picks one **behavior** by weighted random choice.
@@ -51,7 +104,7 @@ Effective weight = `weight` × `time_weights[current_day_part]`.
 | `noise_reaction` | 1.0 | [5, 15] | reacting to an outside noise |
 | `idle` | 0.3 | (none) | single bark, no trigger |
 
-### Episode model — target DURATION, not fixed bark count  ← added this session
+### Episode model — target DURATION, not fixed bark count  ← 2026-08-27 (`24eef6c`)
 
 - Each behavior has `episode_duration_seconds: [min, max]`. At the start of an
   episode a random target in that range is chosen.
@@ -65,6 +118,34 @@ Effective weight = `weight` × `time_weights[current_day_part]`.
 - A behavior with no `episode_duration_seconds` (idle) plays exactly one bark.
 - Legacy `episode_barks: [lo, hi]` in an old config is silently dropped by
   `config._migrate()` on load.
+
+### Playback volume — master volume + distance simulation  ← 2026-08-29
+
+Two independent knobs, combined multiplicatively into the 0.0–1.0 gain passed
+to the player (`src/barkbox/volume.py`):
+
+- **`audio.master_volume`** (0–100) — a global level set from the UI slider in
+  place of a physical knob on the speaker. Applies to scheduled episodes **and
+  manual test barks** (changed 2026-08-29 — `/api/test-bark` now passes
+  `master_gain=master_scale(cfg["audio"])`), so a test plays at the level the
+  device would actually use. The alarm still plays at full volume.
+  (`audio.volume`, the older 0.0–1.0 base gain, still applies to everything.)
+- **`distance_simulation`** — for an episode whose *drawn target duration*
+  exceeds `min_episode_duration_seconds` (6), each bark's volume drifts from
+  the previous bark's by `uniform(-max_step, +max_step)` (default step 20),
+  clamped to `volume_range` (40–100 %). A bounded random walk — the dog moving
+  around, not standing still. `start_volume: null` → random within range, or a
+  fixed percent. Shorter episodes / single-bark behaviors: no drift. **Never
+  applies to manual test barks** (`/api/test-bark` passes `master_gain` but not
+  `distance_cfg`) — only master volume reaches them.
+- `final_gain = (master_volume/100) * (distance_volume/100)`; `distance_volume`
+  is 100 when the walk isn't active. Applied per-bark in `_run_episode` via the
+  new `player.play(clip, volume=...)` argument.
+- ffplay now takes `-af "volume=<gain>"` (was `-volume`); mpg123 folds the
+  per-call gain into its `-f` scale.
+- The `played:<behavior>` event gains a `vol <lo>–<hi>%` note when the walk ran.
+- UI: a "Master volume" slider card (range input, 0–100), `POST /api/master-volume`,
+  and `master_volume` in `/api/status`. Distance sim is config-only (no UI).
 
 ### Sound clips
 
@@ -80,18 +161,51 @@ Effective weight = `weight` × `time_weights[current_day_part]`.
 ### Alarm mode (stub)
 
 - `POST /api/alarm-test` → `state.enter_alarm_mode(duration_minutes)`.
-- While active, pre-empts all three gates: repeated bursts
+- While active, pre-empts the **schedule** and **presence** gates: repeated bursts
   (`alarm.episode_duration_seconds` [10,25]) separated by `alarm.episode_gap_seconds`
   [1,4], for `alarm.duration_minutes` (10).
+- **Master switch beats it** (this session): the scheduler checks `enabled`
+  *before* the alarm branch — `enabled:false` clears an active alarm
+  (`alarm_stopped` event) and the running burst is cut short via the
+  `cancelled` hook (`lambda: not alarm_active or not enabled`).
+- **`POST /api/alarm-stop`** (this session): drops `alarm_until`, wakes the
+  scheduler → current burst ends within one bark, back to normal logic.
+  UI: a "Stop alarm" button + red dot next to "Trigger alarm mode", shown only
+  while `alarm_active` (from `/api/now-playing`, which the page already polls).
 - **No real external trigger yet** — see open items.
 
 ### Web UI (`src/barkbox/web/`)
 
-Single page, vanilla JS, polls `/api/status` + `/api/events` every 5s.
-Controls: master toggle, presence, frequency, schedule mode + **active/quiet
-window HH:MM time fields** (added this session), per-behavior weight + max
-episode-duration + on/off, per-behavior test-bark, alarm test.
+Single page, vanilla JS, polls `/api/status` + `/api/events` every 5s and
+`/api/now-playing` every 250ms.
+Controls: master toggle + **master-volume slider** (both in the top card),
+presence + Home slow-down, frequency preset + editable ranges, schedule mode +
+active/quiet HH:MM fields (whole row `display:none` in Always mode, back in full
+for the window modes — saved values never reset). Needs
+`#schedule-times[hidden]{display:none}` in CSS because the `#schedule-times`
+`display:flex` rule outweighs the bare `[hidden]` UA rule.
+Per-behavior on/off + test-bark, alarm test.
 Optional shared-token auth via `web.auth_token` (default off).
+
+Behaviors table (2026-08-29):
+- **Live "barking now" light** — a dot per row, grey→green while that behavior's
+  episode plays. Driven by `state.now_playing` (set in `_run_episode` for the
+  whole episode — scheduled, alarm or test bark — cleared in a `finally`),
+  exposed by the cheap `GET /api/now-playing` the page polls 4×/s. Verified it
+  fires for manual test barks too. Additive to Recent events, not a replacement.
+  (`/api/now-playing` also returns `alarm_active` for the red alarm dot.)
+- **Manual test barks interrupt each other** — a fresh press cancels the running
+  one immediately and starts the new one. `/api/test-bark` bumps a monotonic
+  `test_current` generation; `_run_episode(cancelled=lambda: superseded)` bails
+  between barks (only the in-flight ~1-2 s clip finishes). Scheduled episodes /
+  alarm are untouched by this.
+- **Qualitative weight slider** — 4 stops `Rare / Occasional / Frequent /
+  Constant` → stored weights `1 / 2 / 4 / 8` (doubling scale). No raw numbers,
+  no percentages. `weightToStop()` picks the nearest stop in **log space** for
+  an arbitrary stored weight (3 → Frequent). Each slider independent; the stored
+  number is unchanged in meaning, only the presentation.
+- **`#behavior-mix`** read-only line: "Roughly, out of every 10 events: 6 alert,
+  2 response, …" — computed client-side from the enabled weights, not editable.
 
 ### Persistence / ops
 
@@ -101,20 +215,20 @@ Optional shared-token auth via `web.auth_token` (default off).
   on the first UI change — that's expected.
 - Events: in-memory ring buffer, last 50, also emitted to stdout/journald. No log file, no DB.
 - `deploy/barkbox.service` (systemd) + `deploy/install.sh` for the Pi.
-- Tests: **83 passing** (`venv\Scripts\pytest -q`).
+- Tests: **139 passing** (`venv\Scripts\pytest -q`). Note: the qualitative
+  weight-slider label↔number mapping is JS-only (no JS test runner) — verified
+  in-browser both directions incl. non-default weights.
 
 ---
 
 ## Config state as of end of this session
 
-`config.yaml` restored to sane defaults EXCEPT a few test tweaks left in place
-(not reverted — revert manually or `copy config.example.yaml config.yaml` if you
-want a clean commented file):
-
-- `behaviors.alert.weight: 1.2` (default 1.0)
-- `behaviors.idle.weight: 0.7` (default 0.3)
-- `behaviors.chase.episode_duration_seconds: [8, 35.0]` (default [8, 20])
-- `schedule.active_window: 08:00–22:30`, `quiet_window: 01:15–05:00` (kept on purpose; mode is `always` so inactive)
+`config.yaml` was **reset to `config.example.yaml`** at end of session — it had
+accumulated experiment values from the day's testing (shrunk `frequency_presets`,
+`frequency: high`, bumped weights, `master_volume: 86`, `chase` duration `[8, 35]`).
+It is gitignored, so none of that was ever in a commit. If you want the old
+schedule windows back: `active_window` was `08:00–22:30`, `quiet_window`
+`01:15–05:00` (both inactive under `mode: always`).
 
 ---
 
@@ -133,14 +247,21 @@ want a clean commented file):
 
 ## Known TODO for next session
 
-1. **Schedule UI clarity** — when `mode` is `Always`, the start/end time fields
-   are hidden but it's a bit abrupt. Consider dimming/disabling them instead, or
-   a clearer "not used in Always mode" affordance. (Currently: `#schedule-times`
-   is `hidden` unless mode is a window.)
-2. Decide Ajax integration method and build `alarm_listener` for real.
-3. Consider a "test whole cycle" / fast-forward button in the UI so behavior can
+1. **Possible `chase.episode_duration_seconds` bug** — at some earlier point it
+   was suspected to be stored reversed (`[20, 8]` instead of `[8, 20]`). Not
+   re-checked this session. `_validate_num_pair` *should* reject `hi < lo` on
+   save, and DEFAULTS/example are `[8, 20]` — but confirm the UI `duration_max`
+   path can't produce an inverted pair, and sanity-check any live config.
+2. **Real Ajax alarm integration** — still only the internal `enter_alarm_mode()`
+   stub. Undecided: webhook (Pi runs an endpoint Ajax/automation POSTs to) vs.
+   smart-plug power sensing. Build `alarm_listener` for real.
+3. **Should the alarm respect `master_volume`?** Right now it does **not** — alarm
+   bursts always play at full volume, on purpose (an alarm should be loud). Left
+   that way deliberately for now; revisit if it turns out you want the master
+   slider to tame test alarms too.
+4. Consider a "test whole cycle" / fast-forward button in the UI so behavior can
    be observed without temporarily shrinking `frequency_presets` by hand.
-4. Maybe surface `episode_duration_seconds[0]` (the min) in the UI too — right
+5. Maybe surface `episode_duration_seconds[0]` (the min) in the UI too — right
    now only the max is editable there, min is config-only.
 
 ## Handy commands

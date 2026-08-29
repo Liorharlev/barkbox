@@ -25,6 +25,7 @@ class AppState:
         self._alarm_until: dt.datetime | None = None
         self._next_event_at: dt.datetime | None = None
         self._last_event: dict[str, Any] | None = None
+        self._now_playing: str | None = None
         self._presence_mode = presence_mode
 
     # -- wake -----------------------------------------------------------------
@@ -45,6 +46,21 @@ class AppState:
     def recent_clips(self) -> list[str]:
         with self._lock:
             return list(self._recent_clips)
+
+    # -- currently playing -------------------------------------------------
+    def set_now_playing(self, behavior: str | None) -> None:
+        """Mark which behavior's episode is playing right now (``None`` = silent).
+
+        Set at the start of every episode — scheduled, alarm or a manual test
+        bark — and cleared when it finishes (after the last bark, not the first).
+        """
+        with self._lock:
+            self._now_playing = behavior
+
+    @property
+    def now_playing(self) -> str | None:
+        with self._lock:
+            return self._now_playing
 
     # -- alarm mode --------------------------------------------------------
     def enter_alarm_mode(self, duration_minutes: float) -> None:

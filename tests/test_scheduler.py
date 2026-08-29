@@ -16,6 +16,15 @@ from barkbox.state import AppState
 CLIPS = [Path("a.mp3"), Path("b.mp3"), Path("c.mp3"), Path("d.mp3")]
 
 
+def _wait_until(pred, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition not met within timeout")
+
+
 # -- pick_clip -------------------------------------------------------------
 
 def test_pick_clip_avoids_recent():
@@ -123,6 +132,62 @@ def test_run_episode_max_barks_is_a_hard_cap():
     assert "cap" in events.recent()[0]["detail"]
 
 
+class _RecordingPlayer(MockPlayer):
+    def __init__(self):
+        super().__init__(simulate_sleep=False)
+        self.volumes = []
+
+    def _play_impl(self, path, volume=1.0):
+        self.volumes.append(volume)
+        super()._play_impl(path, volume)
+
+
+def test_run_episode_defaults_to_full_volume():
+    player = _RecordingPlayer()
+    params = {"max_barks": 5, "episode_duration_seconds": [999, 999],
+              "intra_gap_seconds": [0, 0], "clip_tags": []}
+    _run_episode("alert", params, CLIPS, {}, 2, player, AppState(), EventLog(),
+                 random.Random(1), threading.Event())
+    assert player.volumes == [1.0] * 5
+
+
+def test_run_episode_applies_master_gain():
+    player = _RecordingPlayer()
+    params = {"max_barks": 4, "episode_duration_seconds": [999, 999],
+              "intra_gap_seconds": [0, 0], "clip_tags": []}
+    _run_episode("alert", params, CLIPS, {}, 2, player, AppState(), EventLog(),
+                 random.Random(1), threading.Event(), master_gain=0.5)
+    assert player.volumes == [0.5] * 4
+
+
+def test_run_episode_distance_walk_drifts_volume_within_bounds():
+    player = _RecordingPlayer()
+    events = EventLog()
+    sim = {"enabled": True, "min_episode_duration_seconds": 6,
+           "volume_range": [40, 100], "max_step": 20, "start_volume": 70}
+    params = {"max_barks": 30, "episode_duration_seconds": [999, 999],
+              "intra_gap_seconds": [0, 0], "clip_tags": []}
+    _run_episode("alert", params, CLIPS, {}, 2, player, AppState(), events,
+                 random.Random(3), threading.Event(), distance_cfg=sim)
+    assert player.volumes[0] == 0.70
+    assert all(0.40 <= v <= 1.00 for v in player.volumes)
+    assert len(set(player.volumes)) > 1                      # it actually moved
+    assert "vol" in events.recent()[0]["detail"]
+
+
+def test_run_episode_no_walk_for_short_target():
+    player = _RecordingPlayer()
+    sim = {"enabled": True, "min_episode_duration_seconds": 6,
+           "volume_range": [40, 100], "max_step": 20, "start_volume": 70}
+    params = {"max_barks": 4, "episode_duration_seconds": [3, 3],
+              "intra_gap_seconds": [0, 0], "clip_tags": []}
+    _run_episode("response", params, CLIPS, {}, 2, player, AppState(), EventLog(),
+                 random.Random(1), threading.Event(),
+                 master_gain=0.8, distance_cfg=sim)
+    # short episode: no drift, just the master gain
+    assert player.volumes and all(v == pytest.approx(0.8) for v in player.volumes)
+
+
 def test_run_episode_no_clips_is_noted():
     events = EventLog()
     _run_episode(
@@ -133,6 +198,104 @@ def test_run_episode_no_clips_is_noted():
         random.Random(), threading.Event(),
     )
     assert events.recent()[0]["kind"] == "skipped_no_clips"
+
+
+# -- now_playing -----------------------------------------------------
+
+class _NowPlayingSpy(MockPlayer):
+    """Records state.now_playing at each bark so we can prove it stays set for
+    the *whole* episode, not just the first bark."""
+
+    def __init__(self, state):
+        super().__init__(simulate_sleep=False)
+        self._state = state
+        self.seen = []
+
+    def _play_impl(self, path, volume=1.0):
+        self.seen.append(self._state.now_playing)
+        super()._play_impl(path, volume)
+
+
+def test_run_episode_sets_now_playing_for_every_bark_then_clears():
+    state = AppState()
+    player = _NowPlayingSpy(state)
+    params = {"max_barks": 4, "episode_duration_seconds": [999, 999],
+              "intra_gap_seconds": [0, 0], "clip_tags": []}
+    assert state.now_playing is None
+    _run_episode("chase", params, CLIPS, {}, 2, player, state, EventLog(),
+                 random.Random(1), threading.Event())
+    assert player.seen == ["chase"] * 4
+    assert state.now_playing is None
+
+
+def test_run_episode_no_clips_leaves_now_playing_none():
+    state = AppState()
+    _run_episode(
+        "chase",
+        {"max_barks": 40, "episode_duration_seconds": [1, 2],
+         "intra_gap_seconds": [0, 0], "clip_tags": ["chase"]},
+        [], {}, 3, MockPlayer(simulate_sleep=False), state, EventLog(),
+        random.Random(), threading.Event(),
+    )
+    assert state.now_playing is None
+
+
+def test_run_episode_clears_now_playing_even_if_playback_raises():
+    class Boom(MockPlayer):
+        def _play_impl(self, path, volume=1.0):
+            raise RuntimeError("audio device vanished")
+
+    state = AppState()
+    with pytest.raises(RuntimeError):
+        _run_episode(
+            "alert",
+            {"max_barks": 4, "episode_duration_seconds": [999, 999],
+             "intra_gap_seconds": [0, 0], "clip_tags": []},
+            CLIPS, {}, 2, Boom(simulate_sleep=False), state, EventLog(),
+            random.Random(1), threading.Event(),
+        )
+    assert state.now_playing is None
+
+
+# -- cancellation (manual-test interrupt / alarm cut short) ----------
+
+def test_run_episode_breaks_promptly_when_cancelled_between_barks():
+    state, events = AppState(), EventLog()
+    calls = []
+    flag = threading.Event()
+
+    class FlipOnSecondBark(MockPlayer):
+        def _play_impl(self, path, volume=1.0):
+            calls.append(1)
+            if len(calls) == 2:
+                flag.set()
+
+    _run_episode(
+        "alert",
+        {"max_barks": 100, "episode_duration_seconds": [999, 999],
+         "intra_gap_seconds": [0, 0], "clip_tags": []},
+        CLIPS, {}, 2, FlipOnSecondBark(simulate_sleep=False), state, events,
+        random.Random(1), threading.Event(), cancelled=flag.is_set,
+    )
+    assert len(calls) == 2                       # stopped the moment the flag flipped
+    assert state.now_playing is None
+    assert "interrupted" in events.recent()[0]["detail"]
+
+
+def test_run_episode_cancel_cuts_the_inter_bark_gap_short():
+    state, events = AppState(), EventLog()
+    flag = threading.Event()
+    threading.Timer(0.1, flag.set).start()
+    started = time.monotonic()
+    _run_episode(
+        "alert",
+        {"max_barks": 5, "episode_duration_seconds": [999, 999],
+         "intra_gap_seconds": [30, 30], "clip_tags": []},   # 30s between barks
+        CLIPS, {}, 2, MockPlayer(simulate_sleep=False), state, events,
+        random.Random(1), threading.Event(), cancelled=flag.is_set,
+    )
+    assert time.monotonic() - started < 5        # didn't sit through the 30s gap
+    assert "interrupted" in events.recent()[0]["detail"]
 
 
 # -- run() integration ------------------------------------------------
@@ -192,6 +355,66 @@ def test_run_loop_respects_disabled(monkeypatch):
     kinds = [e["kind"] for e in events.recent()]
     assert "skipped_disabled" in kinds
     assert kinds.count("skipped_disabled") == 1     # logged once, not every recheck
+
+
+# -- master switch beats an active alarm ----------------------------
+
+def test_master_switch_off_stops_an_active_alarm(monkeypatch, tmp_path):
+    monkeypatch.setattr(scheduler, "_IDLE_RECHECK_SECONDS", 0.02)
+    cfg = _fast_config(tmp_path)
+    cfg["enabled"] = False                       # master switch OFF
+    cfg["alarm"]["episode_duration_seconds"] = [50, 50]   # would bark for ages
+    cfg["alarm"]["episode_gap_seconds"] = [0.01, 0.01]
+
+    state, events = AppState(), EventLog()
+    state.enter_alarm_mode(10)
+    assert state.alarm_active()
+
+    stop = threading.Event()
+    th = threading.Thread(
+        target=run, args=(stop, lambda: cfg, state, events, MockPlayer(simulate_sleep=False)),
+        daemon=True,
+    )
+    th.start()
+    time.sleep(0.2)
+    stop.set()
+    state.request_wake()
+    th.join(timeout=3)
+
+    kinds = [e["kind"] for e in events.recent()]
+    assert not state.alarm_active()              # cleared by the master-switch gate
+    assert "alarm_stopped" in kinds
+    assert "played:alarm" not in kinds           # never got to bark
+
+
+def test_turning_enabled_off_ends_an_in_progress_alarm_burst(monkeypatch, tmp_path):
+    monkeypatch.setattr(scheduler, "_IDLE_RECHECK_SECONDS", 0.02)
+    cfg = _fast_config(tmp_path)
+    cfg["enabled"] = True
+    cfg["alarm"]["max_barks"] = 100000
+    cfg["alarm"]["episode_duration_seconds"] = [50, 50]   # long burst
+    cfg["alarm"]["episode_gap_seconds"] = [0.01, 0.01]
+
+    state, events = AppState(), EventLog()
+    state.enter_alarm_mode(10)
+    player = MockPlayer(fixed_secs=0.01, simulate_sleep=True)
+
+    stop = threading.Event()
+    th = threading.Thread(
+        target=run, args=(stop, lambda: cfg, state, events, player), daemon=True,
+    )
+    th.start()
+    _wait_until(lambda: state.now_playing == "alarm")
+
+    cfg["enabled"] = False                       # flip the master switch mid-burst
+    state.request_wake()
+    _wait_until(lambda: state.now_playing is None)
+    _wait_until(lambda: not state.alarm_active())
+
+    stop.set()
+    state.request_wake()
+    th.join(timeout=3)
+    assert "alarm_stopped" in [e["kind"] for e in events.recent()]
 
 
 # -- AppState alarm ---------------------------------------------------

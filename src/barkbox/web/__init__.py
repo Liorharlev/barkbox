@@ -7,6 +7,7 @@ Every mutating endpoint: load config -> change one thing -> ``save_config`` ->
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 import logging
 import random
 import threading
@@ -17,6 +18,7 @@ from ..behaviors import episode_params
 from ..clips import count_tagged, load_clips, load_tags
 from ..config import ConfigError, load_config, parse_hhmm, save_config
 from ..scheduler import _run_episode
+from ..volume import master_scale
 
 logger = logging.getLogger("barkbox.web")
 
@@ -32,7 +34,12 @@ def _iso(value: dt.datetime | None) -> str | None:
 def create_app(config_path, state, events, player, rng: random.Random | None = None) -> Flask:
     app = Flask(__name__)
     rng = rng or random.Random()
+    # Manual test barks run one at a time on a worker thread. A monotonic
+    # "generation" makes a fresh press cancel whatever is still playing:
+    # ``_run_episode`` polls ``cancelled`` and bails as soon as it is superseded.
     fire_lock = threading.Lock()
+    test_seq = itertools.count(1)
+    test_current = [0]
 
     def _cfg() -> dict:
         return load_config(config_path)
@@ -76,6 +83,8 @@ def create_app(config_path, state, events, player, rng: random.Random | None = N
             schedule=cfg["schedule"],
             presence_mode=state.presence_mode,
             frequency=cfg["timing"]["frequency"],
+            frequency_presets=cfg["timing"]["frequency_presets"],
+            home_multiplier=cfg["presence"]["multipliers"].get("home", 1.0),
             behaviors={
                 k: {
                     "enabled": b["enabled"],
@@ -85,6 +94,8 @@ def create_app(config_path, state, events, player, rng: random.Random | None = N
                 }
                 for k, b in cfg["behaviors"].items()
             },
+            master_volume=cfg["audio"].get("master_volume", 100),
+            currently_playing=state.now_playing,
             next_event_at=_iso(state.next_event_at),
             last_event=state.last_event,
             alarm_active=state.alarm_active(),
@@ -97,6 +108,16 @@ def create_app(config_path, state, events, player, rng: random.Random | None = N
     @app.get("/api/events")
     def event_list():
         return jsonify(events=events.recent(50))
+
+    @app.get("/api/now-playing")
+    def now_playing():
+        """Tiny, cheap endpoint the UI polls a few times a second: which behavior
+        is barking right now (scheduled, alarm or test), and whether alarm mode
+        is currently active (for the red indicator, lit through the gaps too)."""
+        return jsonify(
+            currently_playing=state.now_playing,
+            alarm_active=state.alarm_active(),
+        )
 
     # -- mutate --------------------------------------------------------
     @app.post("/api/toggle")
@@ -147,6 +168,45 @@ def create_app(config_path, state, events, player, rng: random.Random | None = N
         _save(cfg, "config_changed", f"frequency={value}")
         return jsonify(frequency=value)
 
+    @app.post("/api/frequency-preset")
+    def set_frequency_preset():
+        """Edit the minute range behind one preset (low / medium / high)."""
+        body = request.get_json(silent=True) or {}
+        key = body.get("key")
+        cfg = _cfg()
+        presets = cfg["timing"]["frequency_presets"]
+        if key not in presets:
+            return jsonify(error=f"unknown preset {key!r}"), 400
+        try:
+            lo = float(body["min"])
+            hi = float(body["max"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify(error="min and max must be numbers"), 400
+        if lo <= 0 or hi <= 0:
+            return jsonify(error="min and max must be positive"), 400
+        if lo > hi:
+            return jsonify(error="min must be <= max"), 400
+        presets[key] = {"min_gap_minutes": lo, "max_gap_minutes": hi}
+        _save(cfg, "config_changed", f"preset:{key}={lo:g}-{hi:g}min")
+        return jsonify(frequency_presets=presets)
+
+    @app.post("/api/home-multiplier")
+    def set_home_multiplier():
+        """Set the Home slow-down factor. The UI sends the *displayed* value
+        (e.g. 4 = "four times slower"); we store its reciprocal as the
+        activity-rate multiplier the scheduler divides by."""
+        body = request.get_json(silent=True) or {}
+        try:
+            shown = float(body.get("value"))
+        except (TypeError, ValueError):
+            return jsonify(error="value must be a number"), 400
+        if shown <= 0:
+            return jsonify(error="value must be greater than 0"), 400
+        cfg = _cfg()
+        cfg["presence"]["multipliers"]["home"] = round(1.0 / shown, 6)
+        _save(cfg, "config_changed", f"home_slowdown=x{shown:g}")
+        return jsonify(home_multiplier=cfg["presence"]["multipliers"]["home"])
+
     @app.post("/api/behaviors")
     def set_behavior():
         body = request.get_json(silent=True) or {}
@@ -181,6 +241,22 @@ def create_app(config_path, state, events, player, rng: random.Random | None = N
         _save(cfg, "config_changed", f"behavior:{key}")
         return jsonify(behavior=key, **cfg["behaviors"][key])
 
+    @app.post("/api/master-volume")
+    def set_master_volume():
+        body = request.get_json(silent=True) or {}
+        try:
+            value = float(body.get("value"))
+        except (TypeError, ValueError):
+            return jsonify(error="value must be a number"), 400
+        if not 0 <= value <= 100:
+            return jsonify(error="value must be in [0, 100]"), 400
+        if value == int(value):
+            value = int(value)
+        cfg = _cfg()
+        cfg["audio"]["master_volume"] = value
+        _save(cfg, "config_changed", f"master_volume={value}")
+        return jsonify(master_volume=value)
+
     @app.post("/api/test-bark")
     def test_bark():
         body = request.get_json(silent=True) or {}
@@ -192,12 +268,23 @@ def create_app(config_path, state, events, player, rng: random.Random | None = N
         tags = load_tags(cfg["paths"]["tags_file"])
         params = episode_params(cfg["behaviors"], behavior)
         no_repeat_last = cfg["anti_repeat"]["no_repeat_last"]
+        # Test barks are scaled by master_volume too, so you hear what the device
+        # would actually play right now. The distance-simulation walk still does
+        # not apply here — that stays scheduled-episodes-only.
+        master_gain = master_scale(cfg["audio"])
+
+        my_gen = next(test_seq)
+        test_current[0] = my_gen  # newest press wins
 
         def _worker():
             with fire_lock:
+                if test_current[0] != my_gen:
+                    return  # a newer test bark superseded us while we waited
                 _run_episode(
                     behavior, params, clips, tags, no_repeat_last,
                     player, state, events, rng, threading.Event(),
+                    master_gain=master_gain,
+                    cancelled=lambda: test_current[0] != my_gen,
                 )
             events.add("test_bark", behavior)
 
@@ -210,5 +297,17 @@ def create_app(config_path, state, events, player, rng: random.Random | None = N
         state.enter_alarm_mode(cfg["alarm"]["duration_minutes"])
         events.add("alarm_triggered", "manual test")
         return jsonify(status="alarm", until=_iso(state.alarm_until))
+
+    @app.post("/api/alarm-stop")
+    def alarm_stop():
+        """Cancel an active alarm now: drop ``alarm_until``, wake the scheduler
+        (which cuts the current burst short and falls back to normal barking, or
+        to silence if the master switch is off)."""
+        was_active = state.alarm_active()
+        state.clear_alarm_mode()
+        state.request_wake()
+        if was_active:
+            events.add("alarm_stopped", "manual")
+        return jsonify(status="ok", alarm_active=state.alarm_active())
 
     return app

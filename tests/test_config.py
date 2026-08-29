@@ -126,6 +126,15 @@ def test_save_roundtrip_is_atomic(tmp_path):
         lambda c: c["behaviors"]["alert"].update(episode_duration_seconds=[-1, 5]),
         lambda c: _disable_all_behaviors(c),
         lambda c: c["audio"].update(volume=3),
+        lambda c: c["audio"].update(master_volume=150),
+        lambda c: c["audio"].update(master_volume=-1),
+        lambda c: c["audio"].update(master_volume="loud"),
+        lambda c: c["distance_simulation"].update(enabled="yes"),
+        lambda c: c["distance_simulation"].update(min_episode_duration_seconds=-1),
+        lambda c: c["distance_simulation"].update(volume_range=[80, 40]),
+        lambda c: c["distance_simulation"].update(volume_range=[40, 120]),
+        lambda c: c["distance_simulation"].update(max_step=0),
+        lambda c: c["distance_simulation"].update(start_volume=999),
     ],
 )
 def test_validation_rejects(tmp_path, mutate):

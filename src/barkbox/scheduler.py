@@ -6,7 +6,8 @@ Three independent gates, checked every cycle:
 2. ``schedule``           — is the system active at this time of day at all?
 3. ``presence`` multiplier — how much activity (home = quiet, away = full).
 
-Alarm mode is an external override that pre-empts all three.
+Alarm mode pre-empts the schedule and presence gates, but **not** the master
+switch: turning ``enabled`` off stops everything, an active alarm included.
 """
 
 from __future__ import annotations
@@ -16,11 +17,13 @@ import logging
 import random
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .behaviors import episode_params, pick_behavior
 from .clips import load_clips, load_tags, resolve_clips
 from .config import get_day_part, is_within_schedule
+from .volume import make_distance_walk, master_scale
 
 logger = logging.getLogger("barkbox.scheduler")
 
@@ -45,6 +48,23 @@ def _wait(stop_event: threading.Event, wake_event: threading.Event, seconds: flo
         if remaining <= 0:
             return "timeout"
         wake_event.wait(min(remaining, 1.0))
+
+
+def _sleep_unless(
+    stop_event: threading.Event,
+    cancelled: Callable[[], bool] | None,
+    seconds: float,
+) -> bool:
+    """Sleep up to ``seconds``; return ``True`` early if ``stop_event`` is set or
+    ``cancelled()`` turns true (polled at 50 ms so an interrupt lands quickly)."""
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        if stop_event.is_set() or (cancelled is not None and cancelled()):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(remaining, 0.05))
 
 
 def pick_clip(
@@ -86,6 +106,10 @@ def _run_episode(
     events,
     rng: random.Random,
     stop_event: threading.Event,
+    *,
+    master_gain: float = 1.0,
+    distance_cfg: dict | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Play an episode toward a random target duration.
 
@@ -94,6 +118,16 @@ def _run_episode(
     reached the target. If so, stop. ``max_barks`` caps the count so a library of
     very short clips can't spin forever. A behavior with no target duration plays
     exactly one bark.
+
+    ``master_gain`` (0.0-1.0) scales every bark; with ``distance_cfg`` a long
+    enough episode also drifts each bark's volume in a random walk to suggest a
+    moving dog. Both default to "off" so manual test barks and the alarm play at
+    full volume.
+
+    ``cancelled`` is polled between barks (and during the inter-bark gap): once
+    it returns true the episode ends early. Used to interrupt a running manual
+    test bark when a new one is pressed, and to cut an alarm burst short the
+    moment the master switch goes off.
     """
     clips = resolve_clips(all_clips, tags, params["clip_tags"])
     if not clips:
@@ -104,28 +138,57 @@ def _run_episode(
     dur = params.get("episode_duration_seconds")
     target = rng.uniform(dur[0], dur[1]) if dur else 0.0
     g_lo, g_hi = params["intra_gap_seconds"]
+    walk = make_distance_walk(distance_cfg, target if dur else None, rng)
 
     started = time.monotonic()
     n = 0
     elapsed = 0.0
-    while n < max_barks:
-        if stop_event.is_set():
-            break
-        clip = pick_clip(clips, state.recent_clips, no_repeat_last, rng)
-        player.play(clip)
-        state.note_played(clip.name)
-        n += 1
-        elapsed = time.monotonic() - started
-        if elapsed >= target:
-            break
-        if g_hi > 0 and stop_event.wait(rng.uniform(g_lo, g_hi)):
-            break
+    vol_lo = vol_hi = None
+    interrupted = False
+    state.set_now_playing(behavior)
+    try:
+        while n < max_barks:
+            if stop_event.is_set():
+                break
+            if cancelled is not None and cancelled():
+                interrupted = True
+                break
+            clip = pick_clip(clips, state.recent_clips, no_repeat_last, rng)
+            gain = master_gain * (walk.next_scale() if walk is not None else 1.0)
+            player.play(clip, gain)
+            if walk is not None:
+                pct = round(gain * 100)
+                vol_lo = pct if vol_lo is None else min(vol_lo, pct)
+                vol_hi = pct if vol_hi is None else max(vol_hi, pct)
+            state.note_played(clip.name)
+            n += 1
+            elapsed = time.monotonic() - started
+            if elapsed >= target:
+                break
+            if g_hi > 0 and _sleep_unless(stop_event, cancelled, rng.uniform(g_lo, g_hi)):
+                interrupted = cancelled is not None and cancelled()
+                break
+    finally:
+        state.set_now_playing(None)
 
     hit_cap = n >= max_barks and elapsed < target
-    events.add(
-        f"played:{behavior}",
-        f"{n} bark(s), {elapsed:.0f}s" + (" (max_barks cap)" if hit_cap else ""),
-    )
+    detail = f"{n} bark(s), {elapsed:.0f}s"
+    if vol_lo is not None:
+        detail += f", vol {vol_lo}–{vol_hi}%"
+    if interrupted:
+        detail += " (interrupted)"
+    elif hit_cap:
+        detail += " (max_barks cap)"
+    events.add(f"played:{behavior}", detail)
+
+
+def _enabled(get_config) -> bool:
+    """Current ``enabled`` flag; assume on if the config can't be read (a broken
+    edit shouldn't look like the master switch was flipped off)."""
+    try:
+        return bool(get_config()["enabled"])
+    except Exception:
+        return True
 
 
 def run(stop_event, get_config, state, events, player, rng: random.Random | None = None) -> None:
@@ -151,7 +214,21 @@ def run(stop_event, get_config, state, events, player, rng: random.Random | None
         tags = load_tags(cfg["paths"]["tags_file"])
         no_repeat_last = cfg["anti_repeat"]["no_repeat_last"]
 
-        # --- alarm override -------------------------------------------------
+        # --- gate 1: master switch — beats everything, an active alarm too --
+        if not cfg["enabled"]:
+            if state.alarm_active(now):
+                state.clear_alarm_mode()
+                events.add("alarm_stopped", "master switch off")
+            if last_skip != "disabled":
+                events.add("skipped_disabled")
+                last_skip = "disabled"
+            state.set_next_event_at(None)
+            if _wait(stop_event, wake, _IDLE_RECHECK_SECONDS) == "stop":
+                break
+            wake.clear()
+            continue
+
+        # --- alarm override (only while the master switch is on) -----------
         if state.alarm_active(now):
             if last_skip != "alarm":
                 events.add("alarm_triggered", f"until {state.alarm_until:%H:%M:%S}")
@@ -166,6 +243,7 @@ def run(stop_event, get_config, state, events, player, rng: random.Random | None
                     "clip_tags": [],
                 },
                 all_clips, tags, no_repeat_last, player, state, events, rng, stop_event,
+                cancelled=lambda: not state.alarm_active() or not _enabled(get_config),
             )
             gap = rng.uniform(*alarm["episode_gap_seconds"])
             if _wait(stop_event, wake, gap) == "stop":
@@ -175,17 +253,6 @@ def run(stop_event, get_config, state, events, player, rng: random.Random | None
         if last_skip == "alarm":
             state.clear_alarm_mode()
             last_skip = None
-
-        # --- gate 1: master switch ---------------------------------------
-        if not cfg["enabled"]:
-            if last_skip != "disabled":
-                events.add("skipped_disabled")
-                last_skip = "disabled"
-            state.set_next_event_at(None)
-            if _wait(stop_event, wake, _IDLE_RECHECK_SECONDS) == "stop":
-                break
-            wake.clear()
-            continue
 
         # --- gate 2: schedule window -----------------------------------
         if not is_within_schedule(now, cfg["schedule"]):
@@ -226,6 +293,8 @@ def run(stop_event, get_config, state, events, player, rng: random.Random | None
         _run_episode(
             behavior, params, all_clips, tags, no_repeat_last,
             player, state, events, rng, stop_event,
+            master_gain=master_scale(cfg["audio"]),
+            distance_cfg=cfg.get("distance_simulation"),
         )
 
     logger.info("scheduler stopped")

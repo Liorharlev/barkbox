@@ -28,6 +28,27 @@ h2 { margin: 0 0 12px; font-size: 15px; text-transform: uppercase; letter-spacin
   border-radius: 12px; padding: 16px; margin-bottom: 14px;
 }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+input[type=range] { flex: 1; accent-color: var(--accent); }
+#master-volume-val { min-width: 3.5em; text-align: right; font-variant-numeric: tabular-nums; }
+.small { font-size: 12px; }
+.volume-row { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+.volume-row > span { color: var(--muted); white-space: nowrap; }
+
+/* live indicators: green = this behavior is barking now, red = alarm mode active */
+.light {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--border); transition: background .12s; flex: none;
+}
+.light.on { background: var(--on); box-shadow: 0 0 6px var(--on); }
+.light.alarm.on { background: var(--off); box-shadow: 0 0 6px var(--off); }
+.alarm-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.alarm-row button.danger { margin-top: 0; }
+
+/* qualitative weight slider */
+.weight-cell { display: flex; align-items: center; gap: 8px; }
+.weight-cell input[type=range] { flex: none; width: 104px; }
+.weight-label { font-size: 12px; color: var(--muted); min-width: 5.5em; }
+#behavior-mix { margin: 12px 0 0; font-size: 13px; }
 .muted { color: var(--muted); }
 .on { color: var(--on); font-weight: 600; }
 .off { color: var(--off); font-weight: 600; }
@@ -39,10 +60,27 @@ button {
 button:hover { border-color: var(--accent); }
 button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 button.big { padding: 12px 22px; font-weight: 600; }
+button.link {
+  border: none; background: none; color: var(--accent); padding: 8px 0;
+  font-size: 13px; margin-top: 10px;
+}
+button.link:hover { text-decoration: underline; }
+.inline-field {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: 12px; color: var(--muted); font-size: 14px;
+}
+.inline-field input { width: 64px; padding: 6px 8px; background: var(--bg); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+#preset-ranges { margin-top: 10px; width: auto; }
+#preset-ranges th, #preset-ranges td { padding-right: 16px; }
+#preset-ranges input { width: 4.5em; }
+#effective-range { margin: 12px 0 0; font-size: 13px; }
+#effective-range div { padding: 1px 0; }
 button.danger { border-color: var(--off); color: var(--off); margin-top: 12px; }
 button.danger:hover { background: var(--off); color: #fff; }
 .btn-group { display: flex; flex-wrap: wrap; gap: 8px; }
 #schedule-times { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+#schedule-times[hidden] { display: none; }   /* the id rule above would otherwise beat [hidden] */
 #schedule-times label { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
 #schedule-times input { padding: 6px 8px; background: var(--bg); color: var(--ink);
   border: 1px solid var(--border); border-radius: 6px; font: inherit; }

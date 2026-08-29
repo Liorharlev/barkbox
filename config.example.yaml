@@ -13,7 +13,7 @@ schedule:
 presence:
   mode: away                       # home | away — set from the UI
   multipliers:                     # activity-rate multiplier: smaller = longer gaps
-    home: 0.25                     # at home: very few barks, natural
+    home: 0.25                     # at home: very few barks (UI shows this as "slow down by x4")
     away: 1.0                      # away: full activity
 
 timing:
@@ -23,7 +23,7 @@ timing:
     evening: ["17:00", "22:00"]
     night:   ["22:00", "06:00"]
   frequency: medium                # low | medium | high (before the presence multiplier)
-  frequency_presets:
+  frequency_presets:               # the minute range behind each preset — editable from the UI
     low:    { min_gap_minutes: 45, max_gap_minutes: 150 }
     medium: { min_gap_minutes: 15, max_gap_minutes: 60 }
     high:   { min_gap_minutes: 5,  max_gap_minutes: 20 }
@@ -80,7 +80,23 @@ anti_repeat:
 audio:
   backend: auto                    # auto | mpg123 | aplay | ffplay | mock
   device: default                  # ALSA device (on the Pi)
-  volume: 0.9                       # 0.0 - 1.0
+  volume: 0.9                       # 0.0 - 1.0 — base gain, applies to ALL playback
+  master_volume: 100               # 0-100 — set from the UI in place of a knob on the
+                                   # speaker. Applies to scheduled episodes AND manual
+                                   # test barks (so a test previews the real level);
+                                   # the alarm still plays at full volume.
+
+# Distance simulation: in an episode long enough to imply the dog is moving
+# around, each bark's volume drifts from the previous one in a bounded random
+# walk, so an outside listener hears a dog that isn't standing in one spot.
+#   final_gain = (master_volume / 100) * (distance_volume / 100)
+# where distance_volume is 100 for any episode at or under the threshold.
+distance_simulation:
+  enabled: true
+  min_episode_duration_seconds: 6  # only episodes whose target duration exceeds this drift
+  volume_range: [40, 100]          # percent bounds for the walk
+  max_step: 20                     # max percent change between consecutive barks
+  start_volume: null               # null = random within volume_range; or a fixed percent
 
 paths:
   sounds_dir: sounds
@@ -91,7 +107,9 @@ web:
   port: 8080
   auth_token: null                 # set a string to require ?token= or Authorization: Bearer
 
-alarm:                             # stub — external override, not part of normal behavior choice
+alarm:                             # stub — overrides the schedule/presence gates, but NOT
+                                   # the master switch (enabled:false stops the alarm too).
+                                   # Stoppable early from the UI ("Stop alarm").
   enabled: false
   duration_minutes: 10             # how long alarm mode stays active
   episode_duration_seconds: [10, 25]   # length of each burst within that window

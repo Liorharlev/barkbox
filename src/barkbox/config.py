@@ -113,7 +113,14 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     "anti_repeat": {"no_repeat_last": 3},
-    "audio": {"backend": "auto", "device": "default", "volume": 0.9},
+    "audio": {"backend": "auto", "device": "default", "volume": 0.9, "master_volume": 100},
+    "distance_simulation": {
+        "enabled": True,
+        "min_episode_duration_seconds": 6,
+        "volume_range": [40, 100],
+        "max_step": 20,
+        "start_volume": None,
+    },
     "paths": {"sounds_dir": "sounds", "tags_file": "sounds/tags.yaml"},
     "web": {"host": "0.0.0.0", "port": 8080, "auth_token": None},
     "alarm": {
@@ -282,8 +289,36 @@ def _validate(cfg: dict) -> None:
     if audio.get("backend") not in _AUDIO_BACKENDS:
         raise ConfigError(f"audio.backend must be one of {_AUDIO_BACKENDS}")
     vol = audio.get("volume")
-    if not isinstance(vol, (int, float)) or not 0 <= vol <= 1:
+    if not isinstance(vol, (int, float)) or isinstance(vol, bool) or not 0 <= vol <= 1:
         raise ConfigError("audio.volume must be a number in [0, 1]")
+    mv = audio.get("master_volume")
+    if not isinstance(mv, (int, float)) or isinstance(mv, bool) or not 0 <= mv <= 100:
+        raise ConfigError("audio.master_volume must be a number in [0, 100]")
+
+    ds = cfg["distance_simulation"]
+    if not isinstance(ds.get("enabled"), bool):
+        raise ConfigError("distance_simulation.enabled must be true or false")
+    mineps = ds.get("min_episode_duration_seconds")
+    if not isinstance(mineps, (int, float)) or isinstance(mineps, bool) or mineps < 0:
+        raise ConfigError(
+            "distance_simulation.min_episode_duration_seconds must be a number >= 0"
+        )
+    _validate_num_pair(
+        ds.get("volume_range"), "distance_simulation.volume_range", minimum=0
+    )
+    v_lo, v_hi = ds["volume_range"]
+    if v_hi > 100:
+        raise ConfigError("distance_simulation.volume_range must lie within [0, 100]")
+    step = ds.get("max_step")
+    if not isinstance(step, (int, float)) or isinstance(step, bool) or step <= 0:
+        raise ConfigError("distance_simulation.max_step must be a number > 0")
+    sv = ds.get("start_volume")
+    if sv is not None and (
+        not isinstance(sv, (int, float)) or isinstance(sv, bool) or not v_lo <= sv <= v_hi
+    ):
+        raise ConfigError(
+            "distance_simulation.start_volume must be null or a number within volume_range"
+        )
 
     web = cfg["web"]
     if not isinstance(web.get("port"), int) or not 1 <= web["port"] <= 65535:

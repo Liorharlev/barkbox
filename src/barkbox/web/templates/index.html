@@ -19,6 +19,12 @@
       </div>
       <button id="toggle" class="big">Toggle</button>
     </div>
+    <div class="volume-row">
+      <span>Master volume</span>
+      <input type="range" id="master-volume" min="0" max="100" step="1">
+      <output id="master-volume-val" class="muted">…</output>
+    </div>
+    <p class="muted small">Applies to scheduled playback and manual test barks alike, so a test plays at the level the device would actually use now. The distance-simulation drift stays scheduled-episodes-only.</p>
   </section>
 
   <section class="card">
@@ -27,6 +33,10 @@
       <button data-mode="home">Home (quiet)</button>
       <button data-mode="away">Away (full)</button>
     </div>
+    <label class="inline-field">
+      When I'm home, slow the frequency down by ×
+      <input type="number" id="home-slowdown" min="1" step="0.5">
+    </label>
   </section>
 
   <section class="card">
@@ -36,6 +46,12 @@
       <button data-value="medium">Medium</button>
       <button data-value="high">High</button>
     </div>
+    <button id="toggle-preset-edit" class="link" type="button">✎ Edit ranges</button>
+    <table id="preset-ranges" hidden>
+      <thead><tr><th>preset</th><th>From (min)</th><th>To (min)</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="effective-range" class="muted"></div>
   </section>
 
   <section class="card">
@@ -55,9 +71,10 @@
   <section class="card">
     <h2>Behaviors</h2>
     <table id="behaviors">
-      <thead><tr><th>behavior</th><th>weight</th><th>episode</th><th></th></tr></thead>
+      <thead><tr><th></th><th>behavior</th><th>how often</th><th>episode</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
+    <p id="behavior-mix" class="muted"></p>
   </section>
 
   <section class="card">
@@ -69,7 +86,11 @@
       <button data-behavior="noise_reaction">Test: noise</button>
       <button data-behavior="idle">Test: idle</button>
     </div>
-    <button id="alarm" class="danger">Trigger alarm mode</button>
+    <div class="alarm-row">
+      <button id="alarm" class="danger">Trigger alarm mode</button>
+      <button id="alarm-stop" class="danger" hidden>Stop alarm</button>
+      <span id="alarm-light" class="light alarm" title="alarm active"></span>
+    </div>
   </section>
 
   <section class="card">
@@ -92,6 +113,70 @@ const post = (url, body) => j(url, {
 });
 
 let scheduleMode = "always";
+let presetEditOpen = false;
+
+const fmtMin = n => Number.isFinite(n) ? (Number.isInteger(n) ? `${n}` : n.toFixed(1)) : "?";
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+const presetOrder = () => [...document.querySelectorAll("#frequency button")].map(b => b.dataset.value);
+
+// Behavior weights are shown as a 4-stop qualitative slider, never raw numbers.
+// The stored weight stays a plain number (a doubling scale) that the weighted
+// random pick uses unchanged — this is purely how it's presented.
+const WEIGHT_STOPS = [1, 2, 4, 8];
+const WEIGHT_LABELS = ["Rare", "Occasional", "Frequent", "Constant"];
+// Nearest stop to an arbitrary stored weight, compared in log space so the
+// doubling scale reads evenly (e.g. 3 → "Frequent", not a toss-up with "Occasional").
+function weightToStop(w) {
+  if (!(w > 0)) return 0;
+  const lg = Math.log2(w);
+  let best = 0, bestD = Infinity;
+  WEIGHT_STOPS.forEach((s, i) => {
+    const d = Math.abs(Math.log2(s) - lg);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return best;
+}
+
+// Read-only intuition line: translate the current enabled weights into a
+// "roughly N of every 10 events" mix. Not editable, just feedback.
+function renderBehaviorMix(behaviors) {
+  const el = document.getElementById("behavior-mix");
+  const on = Object.entries(behaviors).filter(([, b]) => b.enabled && b.weight > 0);
+  const total = on.reduce((sum, [, b]) => sum + b.weight, 0);
+  const parts = total
+    ? on.map(([k, b]) => [k, Math.round(b.weight / total * 10)])
+        .filter(([, n]) => n > 0)
+        .sort((a, b) => b[1] - a[1])
+    : [];
+  el.textContent = parts.length
+    ? "Roughly, out of every 10 events: " + parts.map(([k, n]) => `${n} ${k}`).join(", ")
+    : "";
+}
+
+// Purely client-side: recompute the effective Away / Home ranges from whatever
+// is currently in the preset fields and the slow-down box. Collapsed: just the
+// selected preset. While editing (table open): every preset, so each row edit
+// gives immediate feedback.
+function renderEffectiveRange() {
+  const el = document.getElementById("effective-range");
+  const rows = document.querySelector("#preset-ranges tbody");
+  el.textContent = "";
+  if (!rows || !rows.children.length) return;
+  const slow = parseFloat(document.getElementById("home-slowdown").value);
+  const activeKey = document.querySelector("#frequency button.active")?.dataset.value;
+  const keys = presetEditOpen ? presetOrder() : (activeKey ? [activeKey] : []);
+  for (const key of keys) {
+    const lo = parseFloat(rows.querySelector(`input[data-key="${key}"][data-field="min"]`)?.value);
+    const hi = parseFloat(rows.querySelector(`input[data-key="${key}"][data-field="max"]`)?.value);
+    if (!(lo > 0) || !(hi > 0)) continue;
+    let txt = presetEditOpen ? `${cap(key)} — ` : "";
+    txt += `Away: every ${fmtMin(lo)}–${fmtMin(hi)} min`;
+    if (slow > 0) txt += ` · Home: every ${fmtMin(lo * slow)}–${fmtMin(hi * slow)} min`;
+    const line = document.createElement("div");
+    line.textContent = txt;
+    el.appendChild(line);
+  }
+}
 
 function setActive(groupId, attr, value) {
   document.querySelectorAll(`#${groupId} button`).forEach(b => {
@@ -111,14 +196,54 @@ async function refresh() {
   setActive("frequency", "value", s.frequency);
   setActive("schedule", "mode", s.schedule.mode);
 
+  const slowdown = document.getElementById("home-slowdown");
+  if (document.activeElement !== slowdown) {
+    const m = s.home_multiplier;
+    slowdown.value = m > 0 ? Math.round((1 / m) * 100) / 100 : "";
+  }
+
+  const prTable = document.getElementById("preset-ranges");
+  prTable.hidden = !presetEditOpen;
+  document.getElementById("toggle-preset-edit").textContent =
+    presetEditOpen ? "✕ Done editing" : "✎ Edit ranges";
+  const prBody = prTable.querySelector("tbody");
+  if (!prBody.querySelector("input:focus")) {
+    prBody.innerHTML = "";
+    for (const key of presetOrder()) {
+      const p = s.frequency_presets[key];
+      if (!p) continue;
+      const tr = document.createElement("tr");
+      tr.dataset.key = key;
+      tr.innerHTML = `<td>${cap(key)}</td>
+        <td><input type="number" min="0" step="1" value="${p.min_gap_minutes}" data-key="${key}" data-field="min"></td>
+        <td><input type="number" min="0" step="1" value="${p.max_gap_minutes}" data-key="${key}" data-field="max"></td>`;
+      prBody.appendChild(tr);
+    }
+    prBody.querySelectorAll("input").forEach(inp => {
+      inp.oninput = renderEffectiveRange;
+      inp.onchange = () => {
+        const row = inp.closest("tr");
+        const get = f => parseFloat(row.querySelector(`input[data-field="${f}"]`).value);
+        post("/api/frequency-preset", {key: inp.dataset.key, min: get("min"), max: get("max")})
+          .then(refresh);
+      };
+    });
+  }
+  renderEffectiveRange();
+
+  const mv = document.getElementById("master-volume");
+  if (document.activeElement !== mv) mv.value = s.master_volume;
+  document.getElementById("master-volume-val").textContent = `${mv.value}%`;
+
   scheduleMode = s.schedule.mode;
   const times = document.getElementById("schedule-times");
   const start = document.getElementById("sched-start");
   const end = document.getElementById("sched-end");
-  if (scheduleMode === "always") {
-    times.hidden = true;
-  } else {
-    times.hidden = false;
+  // Always mode: the window fields have no effect, so hide the whole row.
+  // Window modes: show it, populated from that window's saved values (which are
+  // never reset — only the display changes).
+  times.hidden = scheduleMode === "always";
+  if (!times.hidden) {
     const w = s.schedule[scheduleMode];
     if (document.activeElement !== start) start.value = w.start;
     if (document.activeElement !== end) end.value = w.end;
@@ -127,22 +252,42 @@ async function refresh() {
   }
 
   const tb = document.querySelector("#behaviors tbody");
-  tb.innerHTML = "";
-  for (const [key, b] of Object.entries(s.behaviors)) {
-    const tr = document.createElement("tr");
-    const durCell = b.duration_max != null
-      ? `<label>≤<input type="number" min="${b.duration_min ?? 0}" step="1" value="${b.duration_max}" data-key="${key}" data-field="duration_max">s</label>`
-      : `<span class="muted">single</span>`;
-    tr.innerHTML = `<td>${key}</td>
-      <td><label>w <input type="number" min="0" step="0.1" value="${b.weight}" data-key="${key}" data-field="weight"></label></td>
-      <td>${durCell}</td>
-      <td><button data-key="${key}" data-enabled="${b.enabled}">${b.enabled ? "on" : "off"}</button></td>`;
-    tb.appendChild(tr);
+  if (!tb.querySelector("input:focus")) {
+    tb.innerHTML = "";
+    for (const [key, b] of Object.entries(s.behaviors)) {
+      const tr = document.createElement("tr");
+      const stop = weightToStop(b.weight);
+      const durCell = b.duration_max != null
+        ? `<label>≤<input type="number" min="${b.duration_min ?? 0}" step="1" value="${b.duration_max}" data-key="${key}" data-field="duration_max">s</label>`
+        : `<span class="muted">single</span>`;
+      tr.innerHTML = `<td><span class="light" data-behavior="${key}"></span></td>
+        <td>${key}</td>
+        <td class="weight-cell">
+          <input type="range" min="0" max="3" step="1" value="${stop}" data-key="${key}" data-field="weight-stop">
+          <span class="weight-label">${WEIGHT_LABELS[stop]}</span>
+        </td>
+        <td>${durCell}</td>
+        <td><button data-key="${key}" data-enabled="${b.enabled}">${b.enabled ? "on" : "off"}</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll("button").forEach(btn => btn.onclick = () =>
+      post("/api/behaviors", {key: btn.dataset.key, enabled: btn.dataset.enabled !== "true"}).then(refresh));
+    tb.querySelectorAll("input").forEach(inp => {
+      if (inp.dataset.field === "weight-stop") {
+        inp.oninput = () => {
+          inp.closest(".weight-cell").querySelector(".weight-label").textContent =
+            WEIGHT_LABELS[+inp.value];
+        };
+        inp.onchange = () =>
+          post("/api/behaviors", {key: inp.dataset.key, weight: WEIGHT_STOPS[+inp.value]}).then(refresh);
+      } else {
+        inp.onchange = () =>
+          post("/api/behaviors", {key: inp.dataset.key, [inp.dataset.field]: parseFloat(inp.value)}).then(refresh);
+      }
+    });
   }
-  tb.querySelectorAll("button").forEach(btn => btn.onclick = () =>
-    post("/api/behaviors", {key: btn.dataset.key, enabled: btn.dataset.enabled !== "true"}).then(refresh));
-  tb.querySelectorAll("input").forEach(inp => inp.onchange = () =>
-    post("/api/behaviors", {key: inp.dataset.key, [inp.dataset.field]: parseFloat(inp.value)}).then(refresh));
+  renderBehaviorMix(s.behaviors);
+  pollNowPlaying();
 
   const g = document.getElementById("status-grid");
   g.innerHTML = "";
@@ -158,6 +303,19 @@ async function refresh() {
   }
 }
 
+// Fast, lightweight poll (4×/s): light up the behavior barking right now (green)
+// and show whether alarm mode is active (red). Complements Recent events.
+async function pollNowPlaying() {
+  let d;
+  try { d = await j("/api/now-playing"); } catch { return; }
+  document.querySelectorAll("#behaviors .light").forEach(el => {
+    el.classList.toggle("on", el.dataset.behavior === d.currently_playing);
+  });
+  const alarmOn = !!d.alarm_active;
+  document.getElementById("alarm-light").classList.toggle("on", alarmOn);
+  document.getElementById("alarm-stop").hidden = !alarmOn;
+}
+
 async function refreshEvents() {
   let data;
   try { data = await j("/api/events"); } catch { return; }
@@ -171,11 +329,26 @@ async function refreshEvents() {
 }
 
 document.getElementById("toggle").onclick = () => post("/api/toggle").then(refresh);
-document.getElementById("alarm").onclick = () => post("/api/alarm-test").then(() => { refresh(); refreshEvents(); });
+document.getElementById("alarm").onclick = () =>
+  post("/api/alarm-test").then(() => { refresh(); refreshEvents(); pollNowPlaying(); });
+document.getElementById("alarm-stop").onclick = () =>
+  post("/api/alarm-stop").then(() => { refresh(); refreshEvents(); pollNowPlaying(); });
 document.querySelectorAll("#presence button").forEach(b =>
   b.onclick = () => post("/api/presence", {mode: b.dataset.mode}).then(refresh));
 document.querySelectorAll("#frequency button").forEach(b =>
   b.onclick = () => post("/api/frequency", {value: b.dataset.value}).then(refresh));
+document.getElementById("toggle-preset-edit").onclick = () => {
+  presetEditOpen = !presetEditOpen;
+  refresh();
+};
+{
+  const slowdown = document.getElementById("home-slowdown");
+  slowdown.oninput = renderEffectiveRange;
+  slowdown.onchange = () => {
+    const v = parseFloat(slowdown.value);
+    if (v > 0) post("/api/home-multiplier", {value: v}).then(refresh);
+  };
+}
 document.querySelectorAll("#schedule button").forEach(b =>
   b.onclick = () => post("/api/schedule", {mode: b.dataset.mode}).then(refresh));
 
@@ -188,14 +361,22 @@ function saveScheduleTimes() {
 }
 document.getElementById("sched-start").onchange = saveScheduleTimes;
 document.getElementById("sched-end").onchange = saveScheduleTimes;
+
+const masterVol = document.getElementById("master-volume");
+masterVol.oninput = () =>
+  document.getElementById("master-volume-val").textContent = `${masterVol.value}%`;
+masterVol.onchange = () =>
+  post("/api/master-volume", {value: parseInt(masterVol.value, 10)}).then(refresh);
 document.querySelectorAll("#test-bark button").forEach(b =>
   b.onclick = () => post("/api/test-bark", {behavior: b.dataset.behavior}).then(() =>
     setTimeout(refreshEvents, 800)));
 
 refresh();
 refreshEvents();
+pollNowPlaying();
 setInterval(refresh, 5000);
 setInterval(refreshEvents, 5000);
+setInterval(pollNowPlaying, 250);
 </script>
 </body>
 </html>
