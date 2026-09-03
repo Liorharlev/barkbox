@@ -51,14 +51,19 @@ files into `sounds/` to exercise clip selection.
 ## Deploy to the Pi
 
 ```
-git clone <repo> ~/dog-bark-deterrent
-cd ~/dog-bark-deterrent
+git clone <repo> /home/dogpi/barkbox
+cd /home/dogpi/barkbox
 bash deploy/install.sh
 ```
 
 The script installs `mpg123` + `alsa-utils`, builds the venv, copies
 `config.example.yaml` to `config.yaml`, and installs + starts the
-`barkbox` systemd service.
+`barkbox` systemd service (enabled at boot, `Restart=on-failure`). For the
+manual step-by-step version, see [`deploy/INSTALL.md`](deploy/INSTALL.md).
+
+On any fresh deployment, `config.yaml` does not exist yet (it is git-ignored) —
+copy the template into place with `cp config.example.yaml config.yaml` before
+first run. `install.sh` does this for you.
 
 Before trusting it, verify audio out:
 

@@ -1,5 +1,7 @@
-# barkbox configuration — the single source of truth.
-# Copy to config.yaml (the web UI reads and writes that file).
+# barkbox configuration TEMPLATE — safe default values, no personal settings.
+# On a new deployment: cp config.example.yaml config.yaml
+# The app and the web UI read and write config.yaml (git-ignored); this file is
+# only the starting point. Keep the two structures in sync when adding options.
 
 enabled: true                      # master switch — off = total silence
 

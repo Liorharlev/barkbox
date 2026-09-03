@@ -23,8 +23,8 @@ echo ">> installing systemd service"
 SERVICE=/etc/systemd/system/barkbox.service
 sudo cp deploy/barkbox.service "$SERVICE"
 # rewrite paths/user to match this checkout
-sudo sed -i "s#/home/pi/dog-bark-deterrent#${REPO_DIR}#g" "$SERVICE"
-sudo sed -i "s#^User=pi#User=$(id -un)#" "$SERVICE"
+sudo sed -i "s#/home/dogpi/barkbox#${REPO_DIR}#g" "$SERVICE"
+sudo sed -i "s#^User=dogpi#User=$(id -un)#" "$SERVICE"
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now barkbox
