@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
+RUN_USER="$(id -un)"
 
 echo ">> installing system packages (mpg123, alsa-utils)"
 sudo apt-get update -qq
@@ -19,18 +20,27 @@ if [ ! -f config.yaml ]; then
   cp config.example.yaml config.yaml
 fi
 
-echo ">> installing systemd service"
-SERVICE=/etc/systemd/system/barkbox.service
-sudo cp deploy/barkbox.service "$SERVICE"
-# rewrite paths/user to match this checkout
-sudo sed -i "s#/home/dogpi/barkbox#${REPO_DIR}#g" "$SERVICE"
-sudo sed -i "s#^User=dogpi#User=$(id -un)#" "$SERVICE"
+chmod +x deploy/logsync.sh
+
+echo ">> installing systemd units"
+for unit in barkbox.service barkbox-logsync.service barkbox-logsync.timer; do
+  DEST="/etc/systemd/system/${unit}"
+  sudo cp "deploy/${unit}" "$DEST"
+  # rewrite the packaged paths/user to match this checkout
+  sudo sed -i "s#/home/dogpi/barkbox#${REPO_DIR}#g" "$DEST"
+  sudo sed -i "s#^User=dogpi#User=${RUN_USER}#" "$DEST"
+done
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now barkbox
+sudo systemctl enable --now barkbox-logsync.timer
 
 echo
-echo ">> done. check it with:"
+echo ">> done."
+echo "   runtime log (RAM):   /run/barkbox/barkbox.log"
+echo "   archived log (card): /var/log/barkbox/barkbox.log   (flushed daily + on stop)"
+echo
 echo "   systemctl status barkbox"
 echo "   journalctl -u barkbox -f"
+echo "   systemctl list-timers barkbox-logsync.timer"
 echo "   speaker-test -c2 -twav        # verify the speaker first"

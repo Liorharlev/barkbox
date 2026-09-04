@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from logging.handlers import WatchedFileHandler
 from pathlib import Path
 
 import waitress
@@ -23,6 +24,47 @@ from .web import create_app
 
 def _default_config_path() -> Path:
     return Path(os.environ.get("BARKBOX_CONFIG", "config.yaml")).resolve()
+
+
+def _setup_logging() -> logging.Logger:
+    """Configure the root logger.
+
+    Always writes to the console (journald on the Pi — itself volatile/RAM by
+    default). If ``BARKBOX_LOG_DIR`` is set, also writes to
+    ``<dir>/barkbox.log``. On the Pi that directory is a tmpfs (systemd
+    ``RuntimeDirectory=barkbox`` -> ``/run/barkbox``), so runtime logging never
+    hits the SD card; ``deploy/logsync.sh`` (a daily systemd timer, plus the
+    service's ``ExecStopPost``) moves the accumulated lines to the persistent
+    copy under ``/var/log/barkbox``.
+
+    ``WatchedFileHandler`` reopens the file when it disappears, so ``logsync.sh``
+    can rotate it away by a plain ``mv`` with no lost lines and no restart.
+    """
+    level = os.environ.get("BARKBOX_LOG_LEVEL", "INFO").upper()
+    fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+
+    log_dir = os.environ.get("BARKBOX_LOG_DIR", "").strip()
+    if log_dir:
+        try:
+            path = Path(log_dir)
+            path.mkdir(parents=True, exist_ok=True)
+            handlers.append(WatchedFileHandler(path / "barkbox.log"))
+        except OSError as exc:  # fall back to console-only logging
+            logging.getLogger("barkbox").warning(
+                "file logging disabled: cannot use %s (%s)", log_dir, exc
+            )
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    for existing in list(root.handlers):
+        root.removeHandler(existing)
+    for handler in handlers:
+        handler.setFormatter(fmt)
+        root.addHandler(handler)
+
+    return logging.getLogger("barkbox")
 
 
 def _make_cached_loader(path: Path):
@@ -48,11 +90,7 @@ def _make_cached_loader(path: Path):
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=os.environ.get("BARKBOX_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
-    log = logging.getLogger("barkbox")
+    log = _setup_logging()
 
     config_path = _default_config_path()
     cfg = load_config(config_path)

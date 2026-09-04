@@ -1,6 +1,23 @@
 # barkbox — session notes
 
-_Working notes for picking the project back up quickly. Last updated: 2026-08-29._
+_Working notes for picking the project back up quickly. Last updated: 2026-09-04._
+
+## 2026-09-04 — deploy hardening (not yet committed)
+
+- Deploy target path is now `/home/dogpi/barkbox`, user `dogpi` (was
+  `/home/pi/dog-bark-deterrent`). `barkbox.service`: `Restart=on-failure`.
+- **SD-card-friendly logging.** `src/barkbox/app.py` `_setup_logging()`: console
+  always; if `BARKBOX_LOG_DIR` is set, also a `WatchedFileHandler` at
+  `<dir>/barkbox.log`. The unit sets `BARKBOX_LOG_DIR=/run/barkbox` +
+  `RuntimeDirectory=barkbox` (tmpfs/RAM, `RuntimeDirectoryPreserve=yes`).
+- `deploy/logsync.sh` moves the RAM log to `/var/log/barkbox/barkbox.log`
+  (`LogsDirectory=barkbox`, on the card) by `mv` + append — lossless because of
+  WatchedFileHandler. Run by `barkbox-logsync.timer` (daily, `Persistent=true`)
+  and `barkbox.service` `ExecStopPost`. Self-rotates the archive past ~5 MB.
+- New files: `deploy/logsync.sh`, `deploy/barkbox-logsync.{service,timer}`,
+  `deploy/INSTALL.md`. `install.sh` installs all three units + enables the timer.
+- No `config.yaml` schema change — logging is env-driven like `BARKBOX_LOG_LEVEL`.
+- 139 tests still pass.
 
 ## What this is
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=barkbox — daily RAM-log flush to the SD card
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

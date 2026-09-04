@@ -1,0 +1,11 @@
+[Unit]
+Description=barkbox — flush the RAM log to the SD card
+
+[Service]
+Type=oneshot
+User=dogpi
+LogsDirectory=barkbox
+LogsDirectoryMode=0750
+Environment=BARKBOX_LOG_DIR=/run/barkbox
+Environment=BARKBOX_ARCHIVE_DIR=/var/log/barkbox
+ExecStart=/home/dogpi/barkbox/deploy/logsync.sh

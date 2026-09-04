@@ -57,9 +57,15 @@ bash deploy/install.sh
 ```
 
 The script installs `mpg123` + `alsa-utils`, builds the venv, copies
-`config.example.yaml` to `config.yaml`, and installs + starts the
-`barkbox` systemd service (enabled at boot, `Restart=on-failure`). For the
-manual step-by-step version, see [`deploy/INSTALL.md`](deploy/INSTALL.md).
+`config.example.yaml` to `config.yaml`, and installs + starts the `barkbox`
+systemd service (enabled at boot, `Restart=on-failure`) plus a daily
+`barkbox-logsync.timer`. For the manual step-by-step version, see
+[`deploy/INSTALL.md`](deploy/INSTALL.md).
+
+To spare the SD card, the running service logs only to tmpfs
+(`/run/barkbox/barkbox.log`, in RAM). `deploy/logsync.sh` appends that to a
+persistent copy at `/var/log/barkbox/barkbox.log` once a day and on every
+stop/reboot. Details in [`deploy/INSTALL.md`](deploy/INSTALL.md#logging--ram-at-runtime-daily-backup-to-the-card).
 
 On any fresh deployment, `config.yaml` does not exist yet (it is git-ignored) —
 copy the template into place with `cp config.example.yaml config.yaml` before
@@ -86,11 +92,11 @@ journalctl -u barkbox -f
 | `src/barkbox/behaviors.py` | weighted behavior selection |
 | `src/barkbox/scheduler.py` | the main loop |
 | `src/barkbox/web/` | Flask control UI |
-| `deploy/` | systemd unit + install script |
+| `deploy/` | systemd units, install script, `logsync.sh` (RAM-log → SD backup) |
 
 ## Not in this phase
 
 - Real Ajax integration (webhook / smart plug) — only the internal alarm stub.
 - HTTPS / real auth (shared token only).
-- Persistent log file / database / graphs.
+- Database / graphs (there is now a rotating persistent log file, but no DB).
 - Automatic adaptation of behavior weights (weather, season) — manual via config.

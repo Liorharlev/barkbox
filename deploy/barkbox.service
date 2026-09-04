@@ -7,8 +7,25 @@ Wants=network-online.target
 Type=simple
 User=dogpi
 WorkingDirectory=/home/dogpi/barkbox
+
+# Runtime log dir lives in tmpfs (/run is always tmpfs). Preserve it across
+# service restarts; it is still wiped on reboot, which is why logsync.sh runs
+# on every stop and once a day.
+RuntimeDirectory=barkbox
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+# Persistent copy on the SD card: /var/log/barkbox, owned by the service user.
+LogsDirectory=barkbox
+LogsDirectoryMode=0750
+
 Environment=BARKBOX_CONFIG=/home/dogpi/barkbox/config.yaml
+Environment=BARKBOX_LOG_DIR=/run/barkbox
+Environment=BARKBOX_ARCHIVE_DIR=/var/log/barkbox
+
 ExecStart=/home/dogpi/barkbox/venv/bin/python /home/dogpi/barkbox/run.py
+# Flush the in-RAM log to the SD card on every stop/restart/shutdown.
+ExecStopPost=-/home/dogpi/barkbox/deploy/logsync.sh
+
 Restart=on-failure
 RestartSec=5
 
