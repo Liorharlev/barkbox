@@ -2,22 +2,51 @@
 
 _Working notes for picking the project back up quickly. Last updated: 2026-09-04._
 
-## 2026-09-04 — deploy hardening (not yet committed)
+## 2026-09-04 — deployed to the Pi + deploy hardening
 
-- Deploy target path is now `/home/dogpi/barkbox`, user `dogpi` (was
-  `/home/pi/dog-bark-deterrent`). `barkbox.service`: `Restart=on-failure`.
-- **SD-card-friendly logging.** `src/barkbox/app.py` `_setup_logging()`: console
-  always; if `BARKBOX_LOG_DIR` is set, also a `WatchedFileHandler` at
-  `<dir>/barkbox.log`. The unit sets `BARKBOX_LOG_DIR=/run/barkbox` +
-  `RuntimeDirectory=barkbox` (tmpfs/RAM, `RuntimeDirectoryPreserve=yes`).
-- `deploy/logsync.sh` moves the RAM log to `/var/log/barkbox/barkbox.log`
-  (`LogsDirectory=barkbox`, on the card) by `mv` + append — lossless because of
-  WatchedFileHandler. Run by `barkbox-logsync.timer` (daily, `Persistent=true`)
-  and `barkbox.service` `ExecStopPost`. Self-rotates the archive past ~5 MB.
+**The Pi is now live.** Step 1 is no longer "dev only" — the service runs on the
+hardware.
+
+### On the Pi (done + verified)
+
+- **systemd service installed and running.** `barkbox.service` is
+  `enable`d (auto-starts at boot) and active. `Restart=on-failure` +
+  `RestartSec=5` — verified it comes back on its own after a crash / `kill`.
+  Checkout at `/home/dogpi/barkbox`, runs as user `dogpi`
+  (was `/home/pi/dog-bark-deterrent`).
+- **Static IP** `10.0.0.8/24` on `wlan0`, gateway + DNS `10.0.0.138`, set
+  client-side in `/etc/dhcpcd.conf` on the Pi (not a router-side DHCP
+  reservation). Control UI: `http://10.0.0.8:8080`. SSH: `ssh dogpi@10.0.0.8`.
+- **RAM logging + daily SD backup — installed and verified.** Runtime log lives
+  in tmpfs at `/run/barkbox/barkbox.log` (no SD wear); `deploy/logsync.sh`
+  appends it to `/var/log/barkbox/barkbox.log` on the card once a day
+  (`barkbox-logsync.timer`, `Persistent=true`) and on every stop/reboot
+  (`ExecStopPost`). Confirmed: runtime log fills in RAM, archive gets the lines
+  after a manual `systemctl start barkbox-logsync`, no lines lost across a
+  restart.
+
+### Code / repo changes (committed? check `git log`)
+
+- `src/barkbox/app.py` `_setup_logging()`: console always; if `BARKBOX_LOG_DIR`
+  is set, also a `WatchedFileHandler` at `<dir>/barkbox.log`. The unit sets
+  `BARKBOX_LOG_DIR=/run/barkbox` + `RuntimeDirectory=barkbox` (tmpfs,
+  `RuntimeDirectoryPreserve=yes`), `LogsDirectory=barkbox` → `/var/log/barkbox`.
+- `deploy/logsync.sh` moves the RAM log by `mv` + append — lossless because
+  `WatchedFileHandler` recreates the file. Self-rotates the on-card archive past
+  ~5 MB (`barkbox.log.1`..`.5`).
 - New files: `deploy/logsync.sh`, `deploy/barkbox-logsync.{service,timer}`,
   `deploy/INSTALL.md`. `install.sh` installs all three units + enables the timer.
 - No `config.yaml` schema change — logging is env-driven like `BARKBOX_LOG_LEVEL`.
 - 139 tests still pass.
+
+### Still open
+
+- `dhcpcd.conf` static IP is client-side only — if the Pi is reimaged, redo it
+  (or move it to a router reservation). `dhcpcd` is also deprecated on Pi OS
+  Bookworm (NetworkManager is default); worked here, but revisit if it regresses.
+- Journald persistence: Raspberry Pi OS keeps the journal in RAM by default
+  (`/var/log/journal` absent) — fine, leave it; revisit only if you want boot
+  history to survive power cuts.
 
 ## What this is
 
@@ -26,8 +55,10 @@ Goal: one believable dog with a plausible daily rhythm so anyone listening from
 outside believes a dog lives here, even when the house is empty. Not an alarm
 siren — alarm mode is a sub-case.
 
-Status: **step 1 built and verified on Windows** (dev). Hardware not bought/installed yet.
-Runs locally with `python run.py` → control UI on http://localhost:8080
+Status: **deployed and running on the Pi** (2026-09-04) — `barkbox.service` active,
+auto-restarts on failure, auto-starts at boot; static IP in `/etc/dhcpcd.conf`;
+RAM logging + daily SD backup in place. See the 2026-09-04 section above.
+Still dev on Windows too: `python run.py` → control UI on http://localhost:8080
 (or double-click `start_server.bat`, which cd's in, launches the server and opens
 the browser ~4 s later).
 Audio backend auto-detects (`ffplay` on this machine via ffmpeg; `mpg123` planned on the Pi; `mock` = log only).
@@ -254,13 +285,16 @@ schedule windows back: `active_window` was `08:00–22:30`, `quiet_window`
 - **Ajax alarm integration** — the real deal. Still undecided: webhook (Pi runs
   an endpoint Ajax/automation POSTs to) vs. smart-plug power sensing. Only the
   internal `enter_alarm_mode()` stub exists.
-- **Hardware** — microSD, PSU, case, outdoor speaker not bought. Pi OS not flashed. SSH not set up.
+- ~~**Hardware**~~ — done: Pi OS flashed, SSH up, service deployed and running
+  (2026-09-04, see top). Outdoor speaker wiring/placement still to finalize.
 - **Clip tagging** — `sounds/tags.yaml` is empty. Works fine (fallback pool) but
   behaviors aren't differentiated by sound yet. Tag clips as the library grows.
 - **`mpg123` path** — only `ffplay` tested (Windows). Verify `mpg123 -q -f <scale>`
   on the Pi with `speaker-test` first.
 - **Web UI security** — shared token only, HTTP only. Fine for home LAN; revisit if exposed.
-- No persistent history/log file (deliberate for now).
+- No persistent *history*/event database (deliberate). There *is* now a
+  persistent text log on the Pi (`/var/log/barkbox/barkbox.log`, RAM-buffered,
+  flushed daily) — see the 2026-09-04 section.
 
 ## Known TODO for next session
 
