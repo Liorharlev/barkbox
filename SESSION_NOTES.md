@@ -2,6 +2,237 @@
 
 _Working notes for picking the project back up quickly. Last updated: 2026-09-04._
 
+## 2026-09-04 (pm, cont'd) — Bug 3: ffplay "succeeds" with zero process running
+
+After Bugs 1 (ALSA `-524`) and 2 (`mpg123` can't play `.wav`) below were both
+fixed — `ffmpeg` installed, `audio.backend: ffplay`, `device: plughw:0,0`,
+service restarted — **still silent**. The decisive check: press "test bark" in
+the UI and immediately `ps aux | grep -iE "ffplay|mpg123|aplay"` → **no process
+at all**, while `journalctl -u barkbox` still shows a clean
+`played:chase 15 bark(s), 32s` / `test_bark chase`, no error.
+
+**Where in `player.py` this happens, traced line by line (pre-fix code):**
+`Player._play_impl` → `subprocess.run(cmd, check=True, capture_output=True)`.
+This line *is* reached and *does* spawn `ffplay` for all 15 barks — if it
+weren't, an unhandled exception from `_command()`/`subprocess.run()` would
+propagate out of `_run_episode`'s bark loop (nothing there catches it) and
+`events.add("played:...")`, which runs *after* the loop, would never fire. Since
+it did fire cleanly 15 times, every `subprocess.run()` call returned rc 0. So
+`ffplay` really did run — the `ps aux` miss is just timing (each invocation is
+short; the "32s" is mostly the `intra_gap_seconds` sleeps *between* barks, not
+ffplay itself running long).
+
+**The actual bug:** on `check=True` success, the code **never looked at
+`stdout`/`stderr` at all** — `capture_output=True` was capturing them into an
+object that was then discarded. `ffplay` renders audio through **SDL**; as a
+plain `systemd` service (`Type=simple`, no login session) there is no
+PulseAudio/PipeWire session for SDL to attach to. Depending on the ffmpeg
+build, a failed `SDL_OpenAudioDevice` is either non-fatal (ffplay decodes to
+EOF with no audio callback and exits 0 almost immediately) or logged as a
+`WARNING`-level line that `-loglevel error`/`-loglevel quiet` both suppress —
+either way, **nothing failed loudly enough for `check=True` to notice**, and
+the discarded stderr took the actual reason with it. This is the "exception
+swallowed silently" the request suspected, except it wasn't a `try/except` at
+fault — it was **output nobody read**.
+
+**Fix — `src/barkbox/player.py`, two changes:**
+
+1. **Every backend's `stdout`/`stderr` is now inspected, on every exit code.**
+   `_looks_like_silent_failure()` scans (case-insensitively) for phrases like
+   `"could not open audio device"`, `"device or resource busy"`,
+   `"playback open error"` — if any show up, that play counts as a **failure
+   even when the process exited 0**, feeding the same consecutive-failure
+   counter/CRITICAL escalation from Bug 2's fix. `BARKBOX_LOG_LEVEL=DEBUG` now
+   logs the exact argv + full stdout/stderr for *every* play, success or not.
+2. **New `audio.backend: ffmpeg`** (now the top of the `auto` preference
+   order): `ffmpeg -af volume=... -f wav -` piped directly into
+   `aplay -D <device>`. This is `Player._play_ffmpeg_piped` — two
+   `subprocess.Popen`s joined by a pipe. It removes SDL (and therefore
+   Pulse/PipeWire) from the picture **entirely**; the only thing actually
+   opening the sound card is `aplay`, on the exact same ALSA device that
+   `speaker-test -D plughw:0,0` already proved works. `ffplay` stays available
+   (with `SDL_AUDIODRIVER=alsa`/`AUDIODEV=<device>` pinned in its env, from the
+   earlier fix) as a fallback for a system without `aplay`, which won't happen
+   here since `alsa-utils` is always installed.
+3. `deploy/install.sh` now also does `usermod -aG audio <user>` (a permission
+   gap would show the same "silent success" symptom) and prints a tip to set
+   `BARKBOX_LOG_LEVEL=DEBUG` when audio is still silent with no error.
+4. `+11` tests (piped success/failure, exit-0-but-failure-phrase, clean exit-0)
+   → **152 total**, all green.
+
+**On the Pi:** `git pull`, set `audio.backend: ffmpeg` in `config.yaml` (device
+stays `plughw:0,0`), `sudo systemctl restart barkbox`, then `curl -X POST
+localhost:8080/api/test-bark` — **I could not run `ps aux` / listen myself, no
+SSH access from this session** (`Permission denied (publickey,password)` on
+`dogpi@10.0.0.8`) — so this still needs a human ear on the speaker to close the
+loop. If `ffmpeg` is *still* silent: `sudo systemctl edit barkbox` → add
+```
+[Service]
+Environment=BARKBOX_LOG_LEVEL=DEBUG
+```
+`sudo systemctl restart barkbox`, test-bark again, `journalctl -u barkbox -n50`
+— it will now print the exact `ffmpeg | aplay` argv and both processes' stderr
+even on "success".
+
+## 2026-09-04 (pm) — "no sound on the Pi" was TWO stacked bugs, not a regression
+
+The Pi never actually made a sound. "It worked before" is **Windows dev only** —
+there `detect_backend()` picks `ffplay` (ffmpeg installed) which plays the `.wav`
+clips fine. On the Pi two independent problems sat on top of each other, and
+**no git commit caused either**: `git grep` confirms nothing in the repo has
+ever touched `/boot`, `cmdline`, `config.txt`, `modprobe`, overlayfs or kernel
+params, and `d805741` is pure user-space (tmpfs logging + systemd
+`RuntimeDirectory=`/`LogsDirectory=`, which are not sandboxing options — no
+`PrivateDevices`/`DeviceAllow`). `d805741` is just the commit where we first ran
+`deploy/install.sh` on real hardware.
+
+### Bug 1 — ALSA `-524` (`ENOTSUPP`) opening the PCM  →  FIXED on the Pi
+
+`speaker-test -t wav -c 2` failed with `Playback open error: -524`. `aplay -l`
+showed `card 0: Headphones [bcm2835 Headphones]` (card healthy); `dmesg` showed
+the **kernel command line** carrying contradictory `snd_bcm2835.enable_hdmi=1 …
+=0` / `enable_headphones=0 … =1` — none of it literally in
+`config.txt`/`cmdline.txt` because the **firmware appends it** while expanding
+`config.txt`. Cause: `dtparam=audio=on` (analog via `snd_bcm2835`) **and**
+`dtoverlay=vc4-kms-v3d` (full KMS, also claims HDMI audio) each emit an audio
+param set and they collide, leaving `snd_bcm2835` half-initialised so the
+default PCM opens `-524`. Compounded by a stale `~/.asoundrc` pointing at a
+non-existent `card 1`.
+
+Resolution applied on the Pi (2026-09-04):
+1. `config.txt`: added `,noaudio` to the existing line → `dtoverlay=vc4-kms-v3d,noaudio`
+   (did **not** add a second line). Kept `dtparam=audio=on`.
+2. Deleted the stale `~/.asoundrc`.
+3. Verified `speaker-test -t wav -c 2 -D plughw:0,0` → audible.
+
+If it regresses: `/etc/asound.conf` with `defaults.pcm.card 0` /
+`defaults.ctl.card 0`; `amixer -c 0 cset numid=3 1` to force the jack; check
+`/etc/modprobe.d/*.conf` for a stray `options snd_bcm2835 …`; confirm `dogpi` is
+in the `audio` group (`groups dogpi`).
+
+### Bug 2 — `mpg123` cannot play the `.wav` library  →  FIXED in code this session
+
+ALSA now worked, still silence, but `journalctl` said `played:chase 14 bark(s)`
+with **no error**. Cause: **every clip in `sounds/` is a `.wav`** (Freesound +
+the `anton_bark_*` recordings — zero `.mp3`s), and `install.sh` installed only
+`mpg123` + `alsa-utils`, so `detect_backend()` returned `mpg123`. **`mpg123` is
+an MPEG-audio decoder only** — handed a `.wav` it finds no MPEG frames, decodes
+nothing, and *still exits 0* (silently, with `-q`). Fire-and-forget `play()` +
+`state.now_playing` → the UI shows a healthy green bark.
+
+The `audio.device` guess (`plughw:0,0`) was **not** the problem — `mpg123 -a
+plughw:0,0` is valid; it was never going to emit audio for a WAV regardless.
+
+Code fix (`src/barkbox/player.py`, `deploy/install.sh`, `config.example.yaml`):
+- `detect_backend()` order is now **`ffplay` → `aplay` → `mpg123`** (ffplay is
+  the only one that plays both formats AND can attenuate).
+- **Per-file backend resolution** (`Player._resolve_backend`): if the configured
+  backend can't decode a file's extension, transparently fall back to one that
+  can (`_BACKEND_FORMATS`: mpg123=`.mp3`, aplay=`.wav`, ffplay=both), with a
+  one-time `WARNING`. So `mpg123`+`.wav` → `aplay`; `aplay`+`.mp3` → mpg123/ffplay.
+- `aplay` path logs a one-time `WARNING` when gain <1.0 is asked for (aplay has
+  no volume — plays at 100%; `master_volume` + distance simulation need ffplay).
+- `ffplay` runs with `SDL_AUDIODRIVER=alsa` + `AUDIODEV=<device>` in its env
+  when `audio.device` != `default` (headless service has no Pulse/PipeWire for
+  SDL), and `-loglevel error` (was `quiet`, which hid real errors).
+- `install.sh` now also installs **`ffmpeg`**.
+- `Player._play_impl` counts consecutive failures → `CRITICAL` at 3 / 30 / every
+  300 ("audio output is DOWN") instead of one quiet `ERROR`.
+- `+9` tests → **148 total**, all green.
+
+### Do this on the Pi to finish
+
+```bash
+cd /home/dogpi/barkbox && git pull
+sudo apt install -y ffmpeg
+```
+`config.yaml` → `audio: {backend: ffplay, device: plughw:0,0}` (or `default`
+now that HDMI audio is off). `sudo systemctl restart barkbox`, then
+`curl -X POST localhost:8080/api/test-bark` and **confirm audible sound**, not
+just exit 0. Without ffmpeg it still plays via `aplay` (auto), at fixed 100%.
+
+### "Why now?" — for future reference
+
+Not a PipeWire/firmware regression. To rule that out anyway, on the Pi:
+`grep -iE 'pipewire|wireplumber|linux-image|raspi-firmware|alsa' /var/log/apt/history.log`
+(and `zgrep` the rotated `.gz`). Even if something updated around Sept 4–5,
+Bug 2 explains the silence on its own — mpg123 was never the right player for an
+all-WAV library. **Lesson: `install.sh` must install a backend matching the clip
+formats in `sounds/`, and a player's "exit 0" is not proof of sound.**
+
+<details><summary>original -524 triage notes (superseded by the summary above)</summary>
+
+**Symptom.** After the deploy, UI is green ("barking now"), no errors on screen,
+but nothing comes out of the speaker. On the Pi, `speaker-test -t wav -c 2`
+fails with `Playback open error: -524, Unknown error 524` (that's `ENOTSUPP`).
+`aplay -l` shows `card 0: Headphones [bcm2835 Headphones]` (card is fine).
+`dmesg` shows the **kernel command line** carrying contradictory
+`snd_bcm2835.enable_headphones=0 … enable_headphones=1` /
+`enable_hdmi=1 … enable_hdmi=0`, even though `/boot/firmware/config.txt` and
+`cmdline.txt` don't contain that text.
+
+**`git show d805741` — cleared.** That commit is purely user-space: a Python
+`WatchedFileHandler` to a tmpfs path (`_setup_logging()` in `src/barkbox/app.py`),
+systemd `RuntimeDirectory=`/`LogsDirectory=` (neither is a sandboxing option —
+no `PrivateDevices`, `ProtectSystem`, `DeviceAllow` anywhere), `deploy/logsync.sh`
+(a `mv`+`cat` of a log file), and docs. **Nothing** in the repo touches
+`/boot`, `cmdline`, `config.txt`, `modprobe`, overlayfs, a `/boot` remount, or
+kernel params — `git grep` confirms. And `speaker-test` fails in a plain SSH
+shell with the service stopped, so the unit can't be the cause. The timing is
+coincidental: this was the **first run of `deploy/install.sh` on real hardware**
+(`apt-get update` + `apt-get install alsa-utils` + a fresh-image reboot), which
+is when a pre-existing `config.txt` / KMS audio misconfiguration first took
+effect.
+
+**Root cause of `-524`.** The contradictory `snd_bcm2835.*` params are **appended
+to the kernel command line by the firmware** (`start*.elf`) as it expands
+`config.txt` — they are not meant to appear literally in `cmdline.txt`. Two
+directives each generate an audio param set and they collide: `dtparam=audio=on`
+(analog / headphones via `snd_bcm2835`) **plus** `dtoverlay=vc4-kms-v3d` (full
+KMS, which also claims HDMI audio). With both active the `snd_bcm2835` route ends
+up half-initialised and the ALSA *default* PCM opens with `-524`.
+
+**Fix (on the Pi, `dogpi@10.0.0.8`) — do these in order, test after each:**
+
+1. Confirm the collision:
+   `cat /proc/cmdline` (see the doubled `snd_bcm2835.*`),
+   `cat /boot/firmware/config.txt | grep -nE 'audio|vc4|dtoverlay|dtparam'`.
+2. In `/boot/firmware/config.txt`, make the two directives stop fighting — keep
+   analog, tell KMS to leave audio alone:
+   ```
+   dtparam=audio=on
+   dtoverlay=vc4-kms-v3d,noaudio
+   ```
+   (i.e. add `,noaudio` to the existing `vc4-kms-v3d` line; don't add a second
+   line). `sudo reboot`, then `speaker-test -t wav -c 2`.
+3. If step 2 doesn't clear it, force the analog card as the ALSA default —
+   `/etc/asound.conf`:
+   ```
+   defaults.pcm.card 0
+   defaults.ctl.card 0
+   ```
+   and route to the jack: `amixer -c 0 cset numid=3 1` (1 = headphones,
+   2 = HDMI, 0 = auto).
+4. Check `/etc/modprobe.d/*.conf` for a stray `options snd_bcm2835 …` line
+   (an old tutorial's leftover) and delete it if present.
+5. Bookworm audio goes through PipeWire/WirePlumber. If `speaker-test` now works
+   but only when nothing else is open, the service user may be racing the user
+   session — run barkbox against the card directly: set `audio.device` in
+   `config.yaml` to `plughw:CARD=Headphones,0` (bypasses the default PCM).
+   Also make sure `dogpi` is in the `audio` group: `groups dogpi`,
+   `sudo usermod -aG audio dogpi` if not (needs a service restart / relogin).
+
+**Code change made this session (`src/barkbox/player.py`).** `Player._play_impl`
+still swallows a failed playback (so one bad clip can't kill an episode), but now
+counts consecutive failures and logs `CRITICAL` at 3 / 30 / every 300 —
+`journalctl -u barkbox` (and `/var/log/barkbox/barkbox.log`) will now shout
+"audio output is DOWN" instead of a quiet single `ERROR` line. This is why the
+UI looked healthy: the scheduler treats `play()` as fire-and-forget and
+`state.now_playing` goes green regardless of the subprocess exit code.
+`+3` tests (142 total).
+
+</details>
+
 ## 2026-09-04 — deployed to the Pi + deploy hardening
 
 **The Pi is now live.** Step 1 is no longer "dev only" — the service runs on the

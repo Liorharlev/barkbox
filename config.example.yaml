@@ -80,9 +80,22 @@ anti_repeat:
   no_repeat_last: 3                 # don't reuse any of the last N clips
 
 audio:
-  backend: auto                    # auto | mpg123 | aplay | ffplay | mock
-  device: default                  # ALSA device (on the Pi)
+  backend: auto                    # auto | ffmpeg | ffplay | aplay | mpg123 | mock
+                                   #   ffmpeg  — .wav + .mp3, has volume, decodes+scales then
+                                   #             pipes straight into `aplay` — pure ALSA, no SDL/
+                                   #             Pulse/PipeWire involved anywhere  ← best on a
+                                   #             headless Pi service (needs ffmpeg + alsa-utils)
+                                   #   ffplay  — .wav + .mp3, has volume, but renders via SDL,
+                                   #             which needs a Pulse/PipeWire session — flaky
+                                   #             under a plain systemd service (no login session)
+                                   #   aplay   — .wav only, NO volume     (alsa-utils)
+                                   #   mpg123  — .mp3 only (plays .wav as silence!)
+                                   # 'auto' prefers ffmpeg, then ffplay, then aplay, then mpg123,
+                                   # and per-file falls back to one that fits the format.
+  device: default                  # ALSA device on the Pi. 'default', or e.g. plughw:0,0
+                                   # (card 0, with rate/format conversion — use plughw, not hw).
   volume: 0.9                       # 0.0 - 1.0 — base gain, applies to ALL playback
+                                    # (ffmpeg/ffplay/mpg123 only; aplay always plays at 100%)
   master_volume: 100               # 0-100 — set from the UI in place of a knob on the
                                    # speaker. Applies to scheduled episodes AND manual
                                    # test barks (so a test previews the real level);

@@ -6,9 +6,16 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 RUN_USER="$(id -un)"
 
-echo ">> installing system packages (mpg123, alsa-utils)"
+# ffmpeg gives us the `ffmpeg` backend (decode+volume piped straight into
+# `aplay` -> pure ALSA, no SDL/Pulse/PipeWire) and `ffplay` as a fallback.
+# mpg123 is mp3-only (it "plays" a .wav silently with exit 0); aplay is
+# wav-only and has no volume. See audio.backend in config.example.yaml.
+echo ">> installing system packages (ffmpeg, mpg123, alsa-utils)"
 sudo apt-get update -qq
-sudo apt-get install -y mpg123 alsa-utils python3-venv
+sudo apt-get install -y ffmpeg mpg123 alsa-utils python3-venv
+
+# The service needs to actually open /dev/snd/* — make sure its user can.
+sudo usermod -aG audio "$RUN_USER" || true
 
 echo ">> creating virtualenv"
 python3 -m venv venv
@@ -44,3 +51,8 @@ echo "   systemctl status barkbox"
 echo "   journalctl -u barkbox -f"
 echo "   systemctl list-timers barkbox-logsync.timer"
 echo "   speaker-test -c2 -twav        # verify the speaker first"
+echo "   curl -X POST localhost:8080/api/test-bark   # then a real clip"
+echo "   (audio still silent with no error in the log?"
+echo "    sudo systemctl edit barkbox   # add [Service] / Environment=BARKBOX_LOG_LEVEL=DEBUG"
+echo "    then restart + test-bark: journalctl -u barkbox will show the exact"
+echo "    player command and its stdout/stderr, success or not)"
