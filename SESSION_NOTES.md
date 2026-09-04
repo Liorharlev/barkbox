@@ -2,6 +2,93 @@
 
 _Working notes for picking the project back up quickly. Last updated: 2026-09-04._
 
+## 2026-09-04 (final) — audio confirmed working end-to-end. Full bug chain + lessons.
+
+**Confirmed on the Pi (`dogpi@10.0.0.8`), by the user, this session:**
+`audio.backend: ffplay`, `device: plughw:0,0` → `curl -X POST
+localhost:8080/api/test-bark` produces real sound, **survives a full
+`sudo reboot`** (service auto-starts, audio still works), and several different
+behaviors tested through the UI all play correctly. **Do not change
+`audio.backend` away from `ffplay` on this Pi without re-testing** — it's the
+one combination actually heard coming out of the speaker.
+
+### The five-bug chain, in the order they were found
+
+| # | Symptom | Root cause | Where it's fixed | Tracked in git? |
+|---|---|---|---|---|
+| a | `speaker-test` → `Playback open error: -524` | `dtparam=audio=on` vs `dtoverlay=vc4-kms-v3d` both claiming audio; firmware injects contradictory `snd_bcm2835.*` kernel params not visible in `config.txt`/`cmdline.txt` | Manual edit: `dtoverlay=vc4-kms-v3d,noaudio` in `/boot/firmware/config.txt` | **No — a Pi system file, not in this repo.** Documented in `deploy/INSTALL.md` "Audio troubleshooting" §1 |
+| b | Still `-524` / wrong card | Stale `~/.asoundrc` pointing at a nonexistent card 1 | Deleted on the Pi | **No — a dotfile.** Documented in INSTALL.md §2 |
+| c | `speaker-test` OK, barkbox silent, no error logged | `mpg123` (auto-picked) can't decode `.wav`; the whole clip library is `.wav` | `player.py` `detect_backend()` order + per-file fallback (`_resolve_backend`); `install.sh` installs `ffmpeg` | **Yes** — `src/barkbox/player.py`, `deploy/install.sh` |
+| d | `ffplay` set explicitly, still silent, no error | `ffplay` renders via SDL, which needs a Pulse/PipeWire session a plain systemd service doesn't have; a failed device-open can log below `-loglevel error` and still exit 0 | `SDL_AUDIODRIVER=alsa`/`AUDIODEV=<device>` pinned for ffplay (this is what actually fixed sound on the Pi); output-inspection (`_looks_like_silent_failure`) as a safety net if it ever silently fails again; `audio.backend: ffmpeg` (ffmpeg-decode piped into `aplay`, no SDL at all) as a more robust alternative, now usable but not yet the one running | **Yes** — `src/barkbox/player.py` |
+| e | `audio.backend: ffmpeg` → service **crash-loops**, `journalctl` shows `ConfigError` | My mistake this session: I added the `"ffmpeg"` backend to `player.py` but never added it to `config.py`'s `_AUDIO_BACKENDS` validation allowlist. `app.main()`'s `load_config()` call is unguarded, so the `ConfigError` killed the process every boot and `Restart=on-failure` looped it every 5s until fixed by hand. | `_AUDIO_BACKENDS` in `config.py` is now `("auto", *player._AUTO_ORDER, "mock")` — **derived from `player.py`, not hand-duplicated** — plus a regression test (`test_every_real_player_backend_is_a_valid_config_value`) that walks every real backend through `save_config`/`load_config` | **Yes** — `src/barkbox/config.py`, `tests/test_config.py` |
+
+(a) and (b) are Pi/OS state, outside this repo by nature — a config.txt
+overlay flag and a stray dotfile aren't things `git pull` can fix. (c), (d),
+(e) are all in application code, covered by tests, and ship with every
+`git pull`.
+
+### Does the fix survive reboot / `git pull` / `apt upgrade`?
+
+- **Reboot** — confirmed directly (see top). (a)/(b) are boot-time firmware/OS
+  config, unaffected by an app restart; (c)/(d)/(e) are code, unaffected by
+  reboot.
+- **Future `git pull`** — (c)/(d)/(e) ship in the repo and apply automatically.
+  (a)/(b) do **not** — a fresh SD card / re-flash starts over on those two.
+  `deploy/INSTALL.md`'s new "Audio troubleshooting" section is the durable
+  record for that case (this file is developer notes, not shipped to a fresh
+  install the same way).
+- **`apt upgrade`** — installed packages (`ffmpeg`, `mpg123`, `alsa-utils`)
+  aren't removed by upgrades. `config.txt`/`.asoundrc` aren't touched by
+  package upgrades either (not dpkg-managed). The one real fragility: `plughw:
+  0,0` addresses the sound card **by index** — plugging in a USB audio device
+  later could shift indices and silently repoint it. Noted in
+  `config.example.yaml` and INSTALL.md; not fixed proactively since it's not
+  the current setup, but worth revisiting (`plughw:CARD=Headphones,DEV=0` is
+  the stable form) if hardware ever changes.
+
+### What we learned (so we don't get stuck on this again)
+
+1. **A subprocess exiting 0 is not proof of anything acoustic.** Both `mpg123`
+   (wrong format) and `ffplay` (SDL with no audio session) exited 0 while
+   producing no sound. `player.py` now inspects `stdout`/`stderr` on *every*
+   exit code, not just non-zero ones — that's the actual fix for "the log says
+   success but there's no sound," independent of which specific backend is in
+   use.
+2. **When you add a new value to one allowlist, grep for every other place the
+   same value has to be accepted.** Bug (e) happened because `player.py` and
+   `config.py` each kept their own list of valid backends. Fixed by making one
+   derive from the other; the general lesson — a "backend"/"mode"/"type" enum
+   almost always exists in more than one file, and only a test that actually
+   exercises the full one (`config.py` validation, not just `player.py`
+   directly) catches the mismatch. `tests/test_player.py` had 152 passing
+   tests and never once ran a config value through `config.py`.
+3. **A crash-looping systemd service can look exactly like a silently-broken
+   one from the UI/API side** — `curl` to a dead service just fails to
+   connect, and `Restart=on-failure` can make `systemctl status` flicker
+   between "activating" and "failed" fast enough to be easy to misread.
+   `journalctl -u barkbox -n50` is the first move whenever a config change
+   doesn't do what's expected, before assuming the *logic* is wrong.
+4. **OS-level audio config (config.txt, `.asoundrc`, ALSA card numbering) and
+   application-level playback (which CLI player, which arguments) are two
+   independent layers that both have to work**, and a failure in either one
+   looks identical from the app's side ("no sound"). `speaker-test -D
+   <device>` in a plain shell is the fastest way to tell which layer you're
+   debugging.
+5. **`config.example.yaml`'s comments and `deploy/INSTALL.md` are the two
+   places future-us (or future deploys) will actually read** — this session's
+   fixes are only as durable as those docs, which is why the "Audio
+   troubleshooting" section in INSTALL.md restates the whole chain, not just
+   this file.
+
+### Branch / commit status
+
+`fix/pi-audio-playback` (Bugs c+d fix) was reviewed, tested (152 tests) and
+**merged to `main` at the user's request** (fast-forward, commit `46ceac3`,
+pushed to `origin/main`). This session's follow-up (Bug e — the `config.py`
+validation gap the merge itself exposed — plus the INSTALL.md troubleshooting
+section) is a further commit on top of `main`; see the top of `git log` for the
+hash. No open branch needs merging as of this writing.
+
 ## 2026-09-04 (pm, cont'd) — Bug 3: ffplay "succeeds" with zero process running
 
 After Bugs 1 (ALSA `-524`) and 2 (`mpg123` can't play `.wav`) below were both
@@ -65,7 +152,15 @@ stays `plughw:0,0`), `sudo systemctl restart barkbox`, then `curl -X POST
 localhost:8080/api/test-bark` — **I could not run `ps aux` / listen myself, no
 SSH access from this session** (`Permission denied (publickey,password)` on
 `dogpi@10.0.0.8`) — so this still needs a human ear on the speaker to close the
-loop. If `ffmpeg` is *still* silent: `sudo systemctl edit barkbox` → add
+loop.
+
+> **⚠ Correction (see the final summary at the top of this file):** this
+> instruction was wrong — `"ffmpeg"` was missing from `config.py`'s
+> `_AUDIO_BACKENDS` allowlist, so setting it crash-looped the service. Fixed
+> now (allowlist derived from `player.py` directly); `ffplay` is what's
+> actually confirmed working on the Pi.
+
+If `ffmpeg` is *still* silent: `sudo systemctl edit barkbox` → add
 ```
 [Service]
 Environment=BARKBOX_LOG_LEVEL=DEBUG

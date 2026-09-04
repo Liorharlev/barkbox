@@ -125,6 +125,7 @@ def test_save_roundtrip_is_atomic(tmp_path):
         lambda c: c["behaviors"]["alert"].update(episode_duration_seconds=[30, 5]),
         lambda c: c["behaviors"]["alert"].update(episode_duration_seconds=[-1, 5]),
         lambda c: _disable_all_behaviors(c),
+        lambda c: c["audio"].update(backend="notreal"),
         lambda c: c["audio"].update(volume=3),
         lambda c: c["audio"].update(master_volume=150),
         lambda c: c["audio"].update(master_volume=-1),
@@ -142,6 +143,23 @@ def test_validation_rejects(tmp_path, mutate):
     mutate(data)
     with pytest.raises(ConfigError):
         save_config(tmp_path / "config.yaml", data)
+
+
+def test_every_real_player_backend_is_a_valid_config_value(tmp_path):
+    """Regression guard: on 2026-09-04 `player.py` gained an "ffmpeg" backend
+    that `config.py`'s own `_AUDIO_BACKENDS` tuple didn't know about, so
+    `audio.backend: ffmpeg` crash-looped the service on the Pi (rejected by
+    validation, uncaught in `app.main()`). `_AUDIO_BACKENDS` is now derived
+    from `player._AUTO_ORDER` instead of hand-duplicated - this test would
+    have caught the drift either way.
+    """
+    from barkbox.player import _AUTO_ORDER
+
+    for backend in (*_AUTO_ORDER, "auto", "mock"):
+        data = copy.deepcopy(DEFAULTS)
+        data["audio"]["backend"] = backend
+        save_config(tmp_path / "config.yaml", data)  # must not raise
+        assert load_config(tmp_path / "config.yaml")["audio"]["backend"] == backend
 
 
 def _disable_all_behaviors(c):

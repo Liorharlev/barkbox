@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml
 
+from .player import _AUTO_ORDER as _REAL_AUDIO_BACKENDS
+
 __all__ = [
     "ConfigError",
     "DEFAULTS",
@@ -30,7 +32,12 @@ __all__ = [
 
 _SCHEDULE_MODES = ("always", "active_window", "quiet_window")
 _PRESENCE_MODES = ("home", "away")
-_AUDIO_BACKENDS = ("auto", "mpg123", "aplay", "ffplay", "mock")
+# Sourced from player._AUTO_ORDER (not hand-duplicated) so a backend added
+# there can never again be rejected here as invalid before it's ever tried —
+# that gap ("ffmpeg" missing from this tuple) crash-looped the service on the
+# Pi on 2026-09-04. "auto"/"mock" aren't real player backends, so they're
+# added on top.
+_AUDIO_BACKENDS = ("auto", *_REAL_AUDIO_BACKENDS, "mock")
 
 # Guards writes to any config file. A single lock is fine: there is exactly one
 # config file per process and writes are rare.
